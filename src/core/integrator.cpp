@@ -241,11 +241,11 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Point2i nTiles((sampleExtent.x + tileSize - 1) / tileSize,
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
-    const int TARGET_SPP = 128;
-    const int SAMPLE_BATCH = TARGET_SPP / sampler->samplesPerPixel;
-    if (TARGET_SPP % sampler->samplesPerPixel != 0) {
-        printf("Target spp(%d) is not dividible by SAMPLE_BATCH(%d)",
-               TARGET_SPP, SAMPLE_BATCH);
+    const int SAMPLE_BATCH = 128;
+    const int SPP = sampler->samplesPerPixel;
+    if (SPP % SAMPLE_BATCH != 0) {
+        printf("SPP(%d) is not dividible by SAMPLE_BATCH(%d)",
+               sampler->samplesPerPixel, SAMPLE_BATCH);
         exit(1);
     }
     int imageX = sampleBounds.pMax[0];
@@ -254,10 +254,19 @@ void SamplerIntegrator::Render(const Scene &scene) {
     std::vector<clock_t> counter(imageX * imageY);
     std::vector<int> spps = {128, 256, 512, 1024, 2048, 4096};
 
-    ProgressReporter reporter(nTiles.x * nTiles.y * SAMPLE_BATCH, "Rendering");
+    clock_t globalTime;
+
     char filename[255];
     // for (int spp : spps)
     {
+        // varying SPP
+        /*ParamSet samplerParams;
+        std::unique_ptr<int[]> idata(new int[1]);
+        idata[0] = spp;
+        samplerParams.AddInt("pixelsamples", std::move(idata), 1);
+        sampler =
+        std::shared_ptr<Sampler>(CreateRandomSampler(samplerParams));*/
+
         sprintf(filename, "raytime_random_spp%d.txt", sampler->samplesPerPixel);
         std::ofstream out(filename);
 
@@ -267,7 +276,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
             imageY);
         for (int y = 0; y < imageY; ++y) {
             for (int x = 0; x < imageX; ++x) {
-                pixelSamplerArray[y].push_back(sampler->Clone(y * imageX + x));
+                auto s = sampler->Clone(y * imageX + x);
+                s->StartPixel(Point2i(x, y));
+                pixelSamplerArray[y].push_back(std::move(s));
 
                 // Compute sample bounds for pixel
                 int x0 = sampleBounds.pMin.x + x * tileSize;
@@ -280,24 +291,14 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     camera->film->GetFilmTile(tileBounds));
             }
         }
-        // printf("size of sampler: %d\n", sizeof(*sampler->Clone(0)));
 
-        // varying SPP
-        /*ParamSet samplerParams;
-        std::unique_ptr<int[]> idata(new int[1]);
-        idata[0] = spp;
-        samplerParams.AddInt("pixelsamples", std::move(idata), 1);
-        sampler =
-        std::shared_ptr<Sampler>(CreateRandomSampler(samplerParams));*/
-        for (int i = 0; i < SAMPLE_BATCH; ++i) {
-            for (auto &samplerArray : pixelSamplerArray) {
-                for (auto &sampler : samplerArray) {
-                    sampler->SetSampleNumber(0);
-                }
-            }
+        ProgressReporter reporter(
+            imageX * imageY * std::div(SPP, SAMPLE_BATCH).quot, "Rendering");
+        clock_t globalTime, globalStart = clock();
+        for (int i = 0; i < std::div(SPP, SAMPLE_BATCH).quot; ++i) {
+            clock_t localTime, localStart = clock();
             ParallelFor2D(
                 [&](Point2i pixel) {
-
                     // Allocate _MemoryArena_ for pixel
                     MemoryArena arena;
 
@@ -311,8 +312,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
                     clock_t start = std::clock();
                     {
-                        ProfilePhase pp(Prof::StartPixel);
-                        tileSampler->StartPixel(pixel);
+                        // ProfilePhase pp(Prof::StartPixel);
+                        // tileSampler->StartPixel(pixel);
                     }
 
                     // Do this check after the StartPixel() call; this keeps
@@ -320,8 +321,10 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     // RNGs consistent, which improves reproducability /
                     // debugging.
                     if (!InsideExclusive(pixel, pixelBounds)) return;
-
+                    int sampleCounter = 0;
                     do {
+                        if (sampleCounter++ == SAMPLE_BATCH) break;
+
                         // Initialize _CameraSample_ for current sample
                         CameraSample cameraSample =
                             tileSampler->GetCameraSample(pixel);
@@ -379,27 +382,35 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
                     counter[pixel.x + pixel.y * 256] = std::clock() - start;
 
-                    // Merge image tile into _Film_
-                    // camera->film->MergeFilmTile(std::move(filmTile));
                     reporter.Update();
                 },
-                nTiles);
-        }
+                Point2i(imageX, imageY));
 
+            globalTime = std::clock() - globalStart;
+            localTime = std::clock() - localStart;
+            printf("\n%f s\n", localTime / float(CLOCKS_PER_SEC));
+
+            if (globalTime > 10 * CLOCKS_PER_SEC) {
+                //break;
+            }
+        }
+        reporter.Done();
+        printf("Time for loop: %fs\n\n", globalTime / float(CLOCKS_PER_SEC));
+
+        // Merge image tile into _Film_
         for (auto &arr : filmTileArray) {
             for (auto &filmTile : arr) {
                 camera->film->MergeFilmTile(std::move(filmTile));
             }
         }
 
-        for (int i = 2; i < imageY; ++i) {
+        /*for (int i = 2; i < imageY; ++i) {
             for (int j = 0; j < imageX; ++j) {
                 out << counter[i * imageX + j] << std::endl;
             }
-        }
+        }*/
         out.close();
     }
-    reporter.Done();
 
     LOG(INFO) << "Rendering finished";
 
