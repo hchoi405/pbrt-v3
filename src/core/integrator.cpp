@@ -241,14 +241,17 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Point2i nTiles((sampleExtent.x + tileSize - 1) / tileSize,
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
-    clock_t counter[256 * 257];
+    int imageX = sampleBounds.pMax[0];
+    int imageY = sampleBounds.pMax[1];
+
+    std::vector<clock_t> counter(imageX * imageY);
     std::vector<int> spps = {128, 256, 512, 1024, 2048, 4096};
 
     ProgressReporter reporter(nTiles.x * nTiles.y, "Rendering");
     char filename[255];
     //for (int spp : spps) 
 	{
-        sprintf(filename, "raytime_sobol_spp%d.txt", sampler->samplesPerPixel);
+        sprintf(filename, "raytime_random_spp%d.txt", sampler->samplesPerPixel);
         std::ofstream out(filename);
 
 		// varying SPP
@@ -362,9 +365,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
             },
             nTiles);
 
-        for (int i = 1; i < 257; ++i) {
-            for (int j = 0; j < 256; ++j) {
-                out << counter[i * 256 + j] << std::endl;
+        for (int i = 2; i < imageY; ++i) {
+            for (int j = 0; j < imageX; ++j) {
+                out << counter[i * imageX + j] << std::endl;
             }
         }
         out.close();
