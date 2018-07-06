@@ -241,13 +241,20 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Point2i nTiles((sampleExtent.x + tileSize - 1) / tileSize,
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
+    const int TARGET_SPP = 128;
+    const int SAMPLE_BATCH = TARGET_SPP / sampler->samplesPerPixel;
+    if (TARGET_SPP % sampler->samplesPerPixel != 0) {
+        printf("Target spp(%d) is not dividible by SAMPLE_BATCH(%d)",
+               TARGET_SPP, SAMPLE_BATCH);
+        exit(1);
+    }
     int imageX = sampleBounds.pMax[0];
     int imageY = sampleBounds.pMax[1];
 
     std::vector<clock_t> counter(imageX * imageY);
     std::vector<int> spps = {128, 256, 512, 1024, 2048, 4096};
 
-    ProgressReporter reporter(nTiles.x * nTiles.y, "Rendering");
+    ProgressReporter reporter(nTiles.x * nTiles.y * SAMPLE_BATCH, "Rendering");
     char filename[255];
     // for (int spp : spps)
     {
@@ -273,7 +280,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     camera->film->GetFilmTile(tileBounds));
             }
         }
-        printf("size of sampler: %d\n", sizeof(*sampler->Clone(0)));
+        // printf("size of sampler: %d\n", sizeof(*sampler->Clone(0)));
 
         // varying SPP
         /*ParamSet samplerParams;
@@ -282,95 +289,108 @@ void SamplerIntegrator::Render(const Scene &scene) {
         samplerParams.AddInt("pixelsamples", std::move(idata), 1);
         sampler =
         std::shared_ptr<Sampler>(CreateRandomSampler(samplerParams));*/
-
-        ParallelFor2D(
-            [&](Point2i pixel) {
-
-                // Allocate _MemoryArena_ for pixel
-                MemoryArena arena;
-
-                // Get sampler instance for pixel
-                std::unique_ptr<Sampler> &tileSampler =
-                    pixelSamplerArray[pixel.y][pixel.x];
-
-                // Get _FilmTile_ for pixel
-                std::unique_ptr<FilmTile> &filmTile =
-                    filmTileArray[pixel.y][pixel.x];
-
-                clock_t start = std::clock();
-                {
-                    ProfilePhase pp(Prof::StartPixel);
-                    tileSampler->StartPixel(pixel);
+        for (int i = 0; i < SAMPLE_BATCH; ++i) {
+            for (auto &samplerArray : pixelSamplerArray) {
+                for (auto &sampler : samplerArray) {
+                    sampler->SetSampleNumber(0);
                 }
+            }
+            ParallelFor2D(
+                [&](Point2i pixel) {
 
-                // Do this check after the StartPixel() call; this keeps
-                // the usage of RNG values from (most) Samplers that use
-                // RNGs consistent, which improves reproducability /
-                // debugging.
-                if (!InsideExclusive(pixel, pixelBounds)) return;
+                    // Allocate _MemoryArena_ for pixel
+                    MemoryArena arena;
 
-                do {
-                    // Initialize _CameraSample_ for current sample
-                    CameraSample cameraSample =
-                        tileSampler->GetCameraSample(pixel);
+                    // Get sampler instance for pixel
+                    std::unique_ptr<Sampler> &tileSampler =
+                        pixelSamplerArray[pixel.y][pixel.x];
 
-                    // Generate camera ray for current sample
-                    RayDifferential ray;
-                    Float rayWeight =
-                        camera->GenerateRayDifferential(cameraSample, &ray);
-                    ray.ScaleDifferentials(
-                        1 / std::sqrt((Float)tileSampler->samplesPerPixel));
-                    ++nCameraRays;
+                    // Get _FilmTile_ for pixel
+                    std::unique_ptr<FilmTile> &filmTile =
+                        filmTileArray[pixel.y][pixel.x];
 
-                    // Evaluate radiance along camera ray
-                    Spectrum L(0.f);
-                    if (rayWeight > 0) L = Li(ray, scene, *tileSampler, arena);
-
-                    // Issue warning if unexpected radiance value
-                    // returned
-                    if (L.HasNaNs()) {
-                        LOG(ERROR) << StringPrintf(
-                            "Not-a-number radiance value returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
-                    } else if (L.y() < -1e-5) {
-                        LOG(ERROR) << StringPrintf(
-                            "Negative luminance value, %f, returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            L.y(), pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
-                    } else if (std::isinf(L.y())) {
-                        LOG(ERROR) << StringPrintf(
-                            "Infinite luminance value returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
+                    clock_t start = std::clock();
+                    {
+                        ProfilePhase pp(Prof::StartPixel);
+                        tileSampler->StartPixel(pixel);
                     }
-                    VLOG(1) << "Camera sample: " << cameraSample
-                            << " -> ray: " << ray << " -> L = " << L;
 
-                    // Add camera ray's contribution to image
-                    filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
+                    // Do this check after the StartPixel() call; this keeps
+                    // the usage of RNG values from (most) Samplers that use
+                    // RNGs consistent, which improves reproducability /
+                    // debugging.
+                    if (!InsideExclusive(pixel, pixelBounds)) return;
 
-                    // Free _MemoryArena_ memory from computing image
-                    // sample value
-                    arena.Reset();
-                } while (tileSampler->StartNextSample());
+                    do {
+                        // Initialize _CameraSample_ for current sample
+                        CameraSample cameraSample =
+                            tileSampler->GetCameraSample(pixel);
 
-                counter[pixel.x + pixel.y * 256] = std::clock() - start;
+                        // Generate camera ray for current sample
+                        RayDifferential ray;
+                        Float rayWeight =
+                            camera->GenerateRayDifferential(cameraSample, &ray);
+                        ray.ScaleDifferentials(
+                            1 / std::sqrt((Float)tileSampler->samplesPerPixel));
+                        ++nCameraRays;
 
-                // Merge image tile into _Film_
+                        // Evaluate radiance along camera ray
+                        Spectrum L(0.f);
+                        if (rayWeight > 0)
+                            L = Li(ray, scene, *tileSampler, arena);
+
+                        // Issue warning if unexpected radiance value
+                        // returned
+                        if (L.HasNaNs()) {
+                            LOG(ERROR) << StringPrintf(
+                                "Not-a-number radiance value returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        } else if (L.y() < -1e-5) {
+                            LOG(ERROR) << StringPrintf(
+                                "Negative luminance value, %f, returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                L.y(), pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        } else if (std::isinf(L.y())) {
+                            LOG(ERROR) << StringPrintf(
+                                "Infinite luminance value returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        }
+                        VLOG(1) << "Camera sample: " << cameraSample
+                                << " -> ray: " << ray << " -> L = " << L;
+
+                        // Add camera ray's contribution to image
+                        filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
+
+                        // Free _MemoryArena_ memory from computing image
+                        // sample value
+                        arena.Reset();
+                    } while (tileSampler->StartNextSample());
+
+                    counter[pixel.x + pixel.y * 256] = std::clock() - start;
+
+                    // Merge image tile into _Film_
+                    // camera->film->MergeFilmTile(std::move(filmTile));
+                    reporter.Update();
+                },
+                nTiles);
+        }
+
+        for (auto &arr : filmTileArray) {
+            for (auto &filmTile : arr) {
                 camera->film->MergeFilmTile(std::move(filmTile));
-                reporter.Update();
-            },
-            nTiles);
+            }
+        }
 
         for (int i = 2; i < imageY; ++i) {
             for (int j = 0; j < imageX; ++j) {
