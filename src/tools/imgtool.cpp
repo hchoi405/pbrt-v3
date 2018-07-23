@@ -391,6 +391,7 @@ int diff(int argc, char *argv[]) {
 
     double sum[2] = {0., 0.};
     int smallDiff = 0, bigDiff = 0;
+    double rmse = 0.f;
     double mse = 0.f;
     for (int i = 0; i < res[0].x * res[0].y; ++i) {
         Float rgb[2][3];
@@ -409,6 +410,7 @@ int diff(int argc, char *argv[]) {
 
             float d = std::abs(c0 - c1) / c0;
             mse += (c0 - c1) * (c0 - c1);
+            rmse += (c0 - c1) * (c0 - c1) / pow(c0 + 0.0001, 2.0);
             if (d > .005) ++smallDiff;
             if (d > .05) ++bigDiff;
         }
@@ -421,14 +423,13 @@ int diff(int argc, char *argv[]) {
     if ((tol == 0. && (bigDiff > 0 || smallDiff > 0)) ||
         (tol > 0. && 100.f * std::abs(avgDelta) > tol)) {
         printf(
-            "%s %s\n\tImages differ: %d big (%.2f%%), %d small (%.2f%%)\n"
-            "\tavg 1 = %g, avg2 = %g (%f%% delta)\n"
-            "\tMSE = %g, RMS = %.3f%%\n",
-            filename[0], filename[1], bigDiff,
-            100.f * float(bigDiff) / (3 * res[0].x * res[0].y), smallDiff,
-            100.f * float(smallDiff) / (3 * res[0].x * res[0].y), avg[0],
-            avg[1], 100. * avgDelta, mse / (3. * res[0].x * res[0].y),
-            100. * sqrt(mse / (3. * res[0].x * res[0].y)));
+            "Modified by HJ (180722)\n"
+            "%s %s\n"
+            "\trMSE = %g, RMS = %.3f%%\n"
+			"\tMSE = %g, RMS = %.3f%%\n",
+            filename[0], filename[1], rmse / (3. * res[0].x * res[0].y),
+            100. * sqrt(rmse / (3. * res[0].x * res[0].y)),
+            mse / (3. * res[0].x * res[0].y), sqrt(mse / (3. * res[0].x * res[0].y)));
         if (outfile) {
             // FIXME: diffImage cast is bad.
             WriteImage(outfile, (Float *)diffImage.get(),

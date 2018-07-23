@@ -1,3 +1,4 @@
+#define ADAPTIVE_SAMPLING
 
 /*
     pbrt source code is Copyright(c) 1998-2016
@@ -31,6 +32,7 @@
  */
 
 // core/integrator.cpp*
+#include <array>
 #include <ctime>
 #include <fstream>
 #include <numeric>
@@ -233,11 +235,12 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 
 template <typename T>
 T getVariance(std::vector<T> &arr, T mean) {
-    return std::accumulate(arr.begin(), arr.end(), Spectrum(0.f),
+    return std::accumulate(arr.begin(), arr.end(), T(0.f),
                            [&mean](const T &a, const T &b) {
                                // std::cout << a << ", " << b << std::endl;
                                return a + (b - mean) * (b - mean);
-                           });
+                           }) /
+           arr.size();
 }
 
 void processPixel(Point2i pixel) {}
@@ -245,6 +248,7 @@ void processPixel(Point2i pixel) {}
 // SamplerIntegrator Method Definitions
 void SamplerIntegrator::Render(const Scene &scene) {
     Preprocess(scene, *sampler);
+    std::ios::sync_with_stdio(false);
 
     // Compute number of tiles, _nTiles_, to use for parallel rendering
     Bounds2i sampleBounds = camera->film->GetSampleBounds();
@@ -253,8 +257,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Point2i nTiles((sampleExtent.x + tileSize - 1) / tileSize,
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
-    const int BATCH_SIZE = sampler->samplesPerPixel;//8;
     const int SPP = sampler->samplesPerPixel;
+    const int BATCH_SIZE = SPP / 2;  // SPP / 2
     if (SPP % BATCH_SIZE != 0) {
         printf("SPP(%d) is not dividible by BATCH_SIZE(%d)",
                sampler->samplesPerPixel, BATCH_SIZE);
@@ -263,24 +267,24 @@ void SamplerIntegrator::Render(const Scene &scene) {
     const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
     int imageX = sampleBounds.pMax[0];
     int imageY = sampleBounds.pMax[1];
+    // to exclude cold cache latency, remove some rows
+    const int START_ROW = 2;
+    const int OFFSET = START_ROW * imageX;
+    const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * (imageY - START_ROW);
 
-    std::vector<clock_t> counter(imageX * imageY);
+    std::vector<Float> efficiencyCounter(imageX * imageY);
     std::vector<int> spps = {128, 256, 512, 1024, 2048, 4096};
 
     char filename[255];
 
-    sprintf(filename, "raytime_random_spp%d.txt", sampler->samplesPerPixel);
+    sprintf(filename, "raytime_spp%d.txt", sampler->samplesPerPixel);
     std::ofstream out(filename);
 
-    std::vector<std::vector<std::unique_ptr<Sampler>>> pixelSamplerArray(
-        imageY);
+    /*std::vector<std::vector<std::unique_ptr<Sampler>>> pixelSamplerArray(
+        imageY);*/
     std::vector<std::vector<std::unique_ptr<FilmTile>>> filmTileArray(imageY);
     for (int y = 0; y < imageY; ++y) {
         for (int x = 0; x < imageX; ++x) {
-            auto s = sampler->Clone(y * imageX + x);
-            s->StartPixel(Point2i(x, y));
-            pixelSamplerArray[y].push_back(std::move(s));
-
             // Compute sample bounds for pixel
             int x0 = sampleBounds.pMin.x + x * tileSize;
             int x1 = std::min(x0 + tileSize, sampleBounds.pMax.x);
@@ -292,132 +296,260 @@ void SamplerIntegrator::Render(const Scene &scene) {
         }
     }
 
-    ProgressReporter reporter(imageX * imageY, "Rendering");
-    clock_t globalTime, globalStart = clock();
-    ParallelFor2D(
-        [&](Point2i pixel) {
-            // Allocate _MemoryArena_ for pixel
-            MemoryArena arena;
+    struct PixelEfficiency {
+        Point2i pixel;
+        std::shared_ptr<Sampler> sampler;
+        Float mean;
+        Float variance;
+        Float efficiency;
+    };
+    std::vector<PixelEfficiency> efficiencyMap;
+    ParamSet param;
+    // set maximum spp with arbitrary larget number
+    int idata[1] = {1000000};
+    param.AddInt("pixelsamples", std::unique_ptr<int[]>(idata), 1);
+    auto basicSampler = CreateRandomSampler(param);
+    for (int y = 0; y < imageY; ++y) {
+        for (int x = 0; x < imageX; ++x) {
+            auto s = basicSampler->Clone(y * imageX + x);
+            s->StartPixel(Point2i(x, y));
+            efficiencyMap.push_back({Point2i(x, y), std::move(s), Float(0.0),
+                                     Float(0.0), Float(0.0)});
+        }
+    }
 
-            // Get sampler instance for pixel
-            std::unique_ptr<Sampler> &tileSampler =
-                pixelSamplerArray[pixel.y][pixel.x];
+    std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
+    std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
 
-            // Get _FilmTile_ for pixel
-            std::unique_ptr<FilmTile> &filmTile =
-                filmTileArray[pixel.y][pixel.x];
+    clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
+            overheadStart;
+    std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
+    {
+        // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
+        for (int batch = 1; batch <= BATCH_NUM; ++batch) {
+            ParallelFor(
+                [&](int64_t pIndex) {
+                    Point2i pixel = efficiencyMap[pIndex].pixel;
+                    uint32_t pixelIndex = pixel.y * imageX + pixel.x;
 
-            clock_t start = std::clock();
+                    // do not proceed
+                    if (remainingSamples[pixelIndex] == 0) return;
 
-            {
-                // ProfilePhase pp(Prof::StartPixel);
-                // tileSampler->StartPixel(pixel);
-            }
+                    // Allocate _MemoryArena_ for pixel
+                    MemoryArena arena;
 
-            // Do this check after the StartPixel() call; this keeps
-            // the usage of RNG values from (most) Samplers that use
-            // RNGs consistent, which improves reproducability /
-            // debugging.
-            if (!InsideExclusive(pixel, pixelBounds)) return;
+                    // Get sampler instance for pixel
+                    std::shared_ptr<Sampler> &tileSampler =
+                        efficiencyMap[pixelIndex].sampler;
 
-            std::vector<Spectrum> lValues(BATCH_SIZE);
-
-            for (int i = 0; i < BATCH_NUM; ++i) {
-                clock_t localTime, localStart = clock();
-
-                int sampleCounter = 0;
-
-                // samples
-                do {
-                    if (sampleCounter == BATCH_SIZE) break;
-
-                    // Initialize _CameraSample_ for current sample
-                    CameraSample cameraSample =
-                        tileSampler->GetCameraSample(pixel);
-
-                    // Generate camera ray for current sample
-                    RayDifferential ray;
-                    Float rayWeight =
-                        camera->GenerateRayDifferential(cameraSample, &ray);
-                    ray.ScaleDifferentials(
-                        1 / std::sqrt((Float)tileSampler->samplesPerPixel));
-                    ++nCameraRays;
-
-                    // Evaluate radiance along camera ray
-                    Spectrum L(0.f);
-                    if (rayWeight > 0) L = Li(ray, scene, *tileSampler, arena);
-
-                    // Issue warning if unexpected radiance value
-                    // returned
-                    if (L.HasNaNs()) {
-                        LOG(ERROR) << StringPrintf(
-                            "Not-a-number radiance value returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
-                    } else if (L.y() < -1e-5) {
-                        LOG(ERROR) << StringPrintf(
-                            "Negative luminance value, %f, returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            L.y(), pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
-                    } else if (std::isinf(L.y())) {
-                        LOG(ERROR) << StringPrintf(
-                            "Infinite luminance value returned "
-                            "for pixel (%d, %d), sample %d. Setting to "
-                            "black.",
-                            pixel.x, pixel.y,
-                            (int)tileSampler->CurrentSampleNumber());
-                        L = Spectrum(0.f);
+                    {
+                        // ProfilePhase pp(Prof::StartPixel);
+                        // tileSampler->StartPixel(pixel);
                     }
-                    VLOG(1) << "Camera sample: " << cameraSample
-                            << " -> ray: " << ray << " -> L = " << L;
 
-                    lValues[sampleCounter++] = L;
+                    // Do this check after the StartPixel() call; this keeps
+                    // the usage of RNG values from (most) Samplers that use
+                    // RNGs consistent, which improves reproducability /
+                    // debugging.
+                    if (!InsideExclusive(pixel, pixelBounds)) {
+                        return;
+                    }
 
-                    // Add camera ray's contribution to image
-                    filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
+                    // count samples
+                    globalSampleCounter[ThreadIndex] +=
+                        remainingSamples[pixelIndex];
 
-                    // Free _MemoryArena_ memory from computing image
-                    // sample value
-                    arena.Reset();
-                } while (tileSampler->StartNextSample());
+                    std::vector<Spectrum> radianceValues(
+                        remainingSamples[pixelIndex]);
+                    clock_t localTime, localStart = clock();
 
-                //localTime = std::clock() - localStart;
-                //if (localTime > 10)
-                //    printf("\n%f s\n", localTime / Float(CLOCKS_PER_SEC));
+                    for (uint32_t &sampleIndex = remainingSamples[pixelIndex];
+                         sampleIndex > 0; --sampleIndex) {
+                        // Initialize _CameraSample_ for current sample
+                        CameraSample cameraSample =
+                            tileSampler->GetCameraSample(pixel);
 
-                //// calculate mean and variance variance
-                //Spectrum mean = std::accumulate(lValues.begin(), lValues.end(),
-                //                                Spectrum(0.f)) /
-                //                BATCH_SIZE;
-                //Spectrum variance = getVariance(lValues, mean);
+                        // Generate camera ray for current sample
+                        RayDifferential ray;
+                        Float rayWeight =
+                            camera->GenerateRayDifferential(cameraSample, &ray);
+                        ray.ScaleDifferentials(
+                            1 / std::sqrt((Float)tileSampler->samplesPerPixel));
+                        ++nCameraRays;
 
-                //if (localTime != 0) {
-                //    Spectrum rayEfficiency = variance / Float(localTime);
-                //    // std::cout << rayEfficiency.ToString() << std::endl;
-                //}
+                        // Evaluate radiance along camera ray
+                        Spectrum L(0.f);
+                        if (rayWeight > 0)
+                            L = Li(ray, scene, *tileSampler, arena);
 
-                //// use summation of 3 values of spectrum as error
-                // Float error = (variance[0] + variance[1] + variance[2]) / 3;
-                // if (error < 0.00001) {
-                //    break;
-                //}
+                        // Issue warning if unexpected radiance value
+                        // returned
+                        if (L.HasNaNs()) {
+                            LOG(ERROR) << StringPrintf(
+                                "Not-a-number radiance value returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        } else if (L.y() < -1e-5) {
+                            LOG(ERROR) << StringPrintf(
+                                "Negative luminance value, %f, returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                L.y(), pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        } else if (std::isinf(L.y())) {
+                            LOG(ERROR) << StringPrintf(
+                                "Infinite luminance value returned "
+                                "for pixel (%d, %d), sample %d. Setting to "
+                                "black.",
+                                pixel.x, pixel.y,
+                                (int)tileSampler->CurrentSampleNumber());
+                            L = Spectrum(0.f);
+                        }
+                        VLOG(1) << "Camera sample: " << cameraSample
+                                << " -> ray: " << ray << " -> L = " << L;
+
+                        radianceValues[sampleIndex - 1] = L;
+
+                        // Add camera ray's contribution to image
+                        filmTileArray[pixel.y][pixel.x]->AddSample(
+                            cameraSample.pFilm, L, rayWeight);
+
+                        // Free _MemoryArena_ memory from computing image
+                        arena.Reset();
+
+                        // reporter.Update();
+
+                        if (!tileSampler->StartNextSample()) {
+                            if (sampleIndex != 1) {
+                                std::cout << pixel
+                                          << "ERROR! Lack of samples\n";
+                            }
+                        }
+                    }
+                    localTime = std::clock() - localStart;
+
+#ifdef ADAPTIVE_SAMPLING
+                    // mean and variance of this batch
+                    Spectrum sMean =
+                        std::accumulate(radianceValues.begin(),
+                                        radianceValues.end(), Spectrum(0.f)) /
+                        radianceValues.size();
+                    Spectrum sVariance = getVariance(radianceValues, sMean);
+                    Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
+                    Float fVariance =
+                        (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
+
+                    // temporal variables for calculation
+                    Float n = totalSampleNum[pixelIndex];
+                    Float nVariance = efficiencyMap[pixelIndex].variance;
+                    Float nMean = efficiencyMap[pixelIndex].mean;
+                    Float m = radianceValues.size();
+                    Float mVariance = fVariance;
+                    Float mMean = fMean;
+
+                    Float mnMean = (n * nMean + m * mMean) / (m + n);
+                    Float mnVariance = (n * (nVariance + nMean * nMean) +
+                                        m * (mVariance + mMean * mMean)) /
+                                           (m + n) -
+                                       mnMean * mnMean;
+
+                    // update global mean and variance
+                    efficiencyMap[pixelIndex].mean = mnMean;
+                    efficiencyMap[pixelIndex].variance = mnVariance;
+
+                    // global efficiency
+                    Float relativeVariance =
+                        (efficiencyMap[pixelIndex].variance /
+                         (efficiencyMap[pixelIndex].mean + 0.0001));
+                    efficiencyMap[pixelIndex].efficiency =
+                        relativeVariance / std::max(localTime, clock_t(1));
+
+                    // thresholding
+                    /*if (efficiencyMap[pixelIndex].efficiency > 5) {
+                        efficiencyMap[pixelIndex].efficiency = 5;
+                    }*/
+#endif
+
+                    // counter[pixelIndex] = std::clock() - start;
+                },
+                efficiencyMap.size());
+
+            overheadStart = clock();
+
+#ifdef ADAPTIVE_SAMPLING
+            // do not sort at last iteration
+            if (batch == BATCH_NUM) {
+                break;
+            }
+            
+			printf("[Batch%d]\n", batch);
+
+            // sort by efficiency
+            std::sort(
+                efficiencyMap.begin() + OFFSET, efficiencyMap.end(),
+                [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
+                    return lhs.efficiency > rhs.efficiency;
+                });
+
+            /*for (size_t i = OFFSET; i < efficiencyMap.size(); ++i) {
+                std::cout << efficiencyMap[i].efficiency << std::endl;
+            }*/
+
+            Float effSum = std::accumulate(
+                efficiencyMap.begin() + OFFSET, efficiencyMap.end(), 0.0,
+                [](const Float &a, const PixelEfficiency &b) {
+                    return a + b.efficiency;
+                });
+
+            std::cout << "most efficient pixel: " << efficiencyMap[OFFSET].pixel
+                      << std::endl;
+            printf("efficiency max(%f), sum(%f)\n",
+                   efficiencyMap[OFFSET].efficiency, effSum);
+            printf("mean[%f], variance[%f]\n", efficiencyMap[OFFSET].mean,
+                   efficiencyMap[OFFSET].variance);
+
+            int zeroEffCounter = 0;
+            for (size_t i = OFFSET; i < efficiencyMap.size(); ++i) {
+                auto &pEff = efficiencyMap[i];
+                Float ratio = pEff.efficiency / effSum;
+                pEff.sampler->SetSampleNumber(0);
+                remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] =
+                    std::round(SAMPLES_PER_BATCH * ratio);
+                if (remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] == 0)
+                    zeroEffCounter++;
+
+                totalSampleNum[pEff.pixel.y * imageX + pEff.pixel.x] +=
+                    remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x];
+                efficiencyCounter[pEff.pixel.y * imageX + pEff.pixel.x] =
+                    remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x];
+                // pEff.efficiency;
             }
 
-            counter[pixel.x + pixel.y * 256] = std::clock() - start;
-            reporter.Update();
-        },
-        Point2i(imageX, imageY));
+            printf("number of zero efficiency: %d\n", zeroEffCounter);
 
-    globalTime = std::clock() - globalStart;
+#else
+            for (size_t i = OFFSET; i < remainingSamples.size(); ++i) {
+                auto &pEff = efficiencyMap[i];
+                remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] =
+                    BATCH_SIZE;
+            }
+#endif
+            overheadTime += clock() - overheadStart;
+        }
+        // reporter.Done();
+    }
 
-    reporter.Done();
-
+    globalTime = std::clock() - globalStart - overheadTime;
+    printf("------------[Statistics]------------\n");
+    printf("Time for overhead: %fs\n", overheadTime / Float(CLOCKS_PER_SEC));
+    printf("Time for loop: %fs\n\n", globalTime / Float(CLOCKS_PER_SEC));
+    printf("Counted samples: %u\n",
+           std::accumulate(globalSampleCounter.begin(),
+                           globalSampleCounter.end(), 0));
     // Merge image tile into _Film_
     for (auto &arr : filmTileArray) {
         for (auto &filmTile : arr) {
@@ -425,15 +557,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
         }
     }
 
-    for (int i = 2; i < imageY; ++i) {
-        for (int j = 0; j < imageX; ++j) {
-            out << counter[i * imageX + j] << std::endl;
-        }
+    for (int i = OFFSET; i < efficiencyCounter.size(); ++i) {
+        out << totalSampleNum[i] << std::endl;
     }
     out.close();
 
-    printf("Time for loop: %fs\n\n", globalTime / Float(CLOCKS_PER_SEC));
-
+    std::cout << "Rendering finished" << std::endl;
     LOG(INFO) << "Rendering finished";
 
     // Save final image after rendering
