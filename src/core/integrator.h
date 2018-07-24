@@ -83,6 +83,10 @@ class SamplerIntegrator : public Integrator {
         : camera(camera), sampler(sampler), pixelBounds(pixelBounds) {}
     virtual void Preprocess(const Scene &scene, Sampler &sampler) {}
     void Render(const Scene &scene);
+    std::vector<Spectrum> processPixel(Point2i pixel,
+                                       uint32_t &remainingSampleNum,
+                      const Scene &scene, std::shared_ptr<Sampler> &tileSampler,
+                      MemoryArena &arena, std::unique_ptr<FilmTile> &filmTile); 
     virtual Spectrum Li(const RayDifferential &ray, const Scene &scene,
                         Sampler &sampler, MemoryArena &arena,
                         int depth = 0) const = 0;
