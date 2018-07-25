@@ -272,7 +272,7 @@ template <typename T>
 void writeText(const char filename[], std::vector<T> &values, Point2i res,
                const int OFFSET) {
     char newfilename[255];
-    sprintf(newfilename "stat_%s", filename);
+    sprintf(newfilename, "stat_%s", filename);
     std::ofstream out(newfilename);
     for (int i = OFFSET; i < values.size(); ++i) {
         out << values[i] << std::endl;
@@ -299,12 +299,12 @@ struct PixelEfficiency {
           efficiency(Float(0)) {}
 
     void update(uint32_t m, Float mMean, Float mVariance, Float mTime) {
-        Float mnMean = (n * mean + m * mMean) / (m + n);
-        Float mnVariance =
+        mean = (n * mean + m * mMean) / (m + n);
+        variance =
             (n * (variance + mean * mean) + m * (mVariance + mMean * mMean)) /
                 (m + n) -
-            mnMean * mnMean;
-        Float mnTime = (n * time + m * mTime) / (m + n);
+            mean * mean;
+        time = (n * time + m * mTime) / (m + n);
         n += m;
     }
 };
@@ -445,9 +445,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
         // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
         for (int batch = 1; batch <= BATCH_NUM; ++batch) {
             ParallelFor(
-                [&](int64_t pIndex) {
-                    Point2i pixel = efficiencyList[pIndex].pixel;
-                    uint32_t pixelIndex = pixel.y * imageX + pixel.x;
+                [&](int64_t iter) {
+                    uint32_t pixelIndex =
+                        efficiencyList[iter].pixel.y * imageX +
+                        efficiencyList[iter].pixel.x;
+                    auto &pEff = efficiencyList[iter];
+                    Point2i pixel = pEff.pixel;
 
                     // do not proceed
                     if (remainingSamples[pixelIndex] == 0) return;
@@ -460,8 +463,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     MemoryArena arena;
 
                     // Get sampler instance for pixel
-                    std::shared_ptr<Sampler> &tileSampler =
-                        efficiencyList[pixelIndex].sampler;
+                    std::shared_ptr<Sampler> &tileSampler = pEff.sampler;
 
                     {
                         // ProfilePhase pp(Prof::StartPixel);
@@ -493,18 +495,17 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     Float fVariance =
                         (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
 
-                    efficiencyList[pixelIndex].update(
-                        radianceValues.size(), fMean, fVariance, localTime);
+                    pEff.update(radianceValues.size(), fMean, fVariance,
+                                localTime);
 
-                    if (efficiencyList[pixelIndex].variance > 1) {
-                        efficiencyList[pixelIndex].variance = 1;
-                    }
+                    /*if (pEff.variance > 1) {
+                        pEff.variance = 1;
+                    }*/
 
                     // global efficiency
                     Float relativeVariance =
-                        (efficiencyList[pixelIndex].variance /
-                         pow(efficiencyList[pixelIndex].mean + 0.0001, 2.0));
-                    efficiencyList[pixelIndex].efficiency =
+                        (pEff.variance / pow(pEff.mean + 0.0001, 2.0));
+                    pEff.efficiency =
                         relativeVariance / std::max(localTime, clock_t(1));
 
 #endif
@@ -529,10 +530,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
                     return lhs.efficiency > rhs.efficiency;
                 });
-
-            /*for (size_t i = OFFSET; i < efficiencyList.size(); ++i) {
-                std::cout << efficiencyList[i].efficiency << std::endl;
-            }*/
 
             Float effSum = std::accumulate(
                 efficiencyList.begin() + OFFSET, efficiencyList.end(), 0.0,
@@ -563,7 +560,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 sampleCounter += candidate;
 
                 totalSampleNum[ind] += candidate;
-                // pEff.efficiency;
             }
 
             uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
@@ -613,6 +609,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
         timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
     }
 
+    auto timeIndicator =
+        std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + "_raynum.txt";
+    writeText(timeIndicator.c_str(), totalSampleNum, Point2i(256, 256), OFFSET);
     /*writeText("raynum.txt", totalSampleNum, Point2i(256, 256), OFFSET);
     writeText("variance.txt", varianceMap, Point2i(256, 256), OFFSET);
     writeText("relVariance.txt", relVarianceMap, Point2i(256, 256), OFFSET);
