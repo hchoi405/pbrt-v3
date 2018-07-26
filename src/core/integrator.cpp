@@ -406,7 +406,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
     const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * (imageY - START_ROW);
     const int MAX_SPP = SPP * 8;
 
-    std::vector<std::vector<std::unique_ptr<FilmTile>>> filmTileArray(imageY);
+    // std::vector<std::vector<std::unique_ptr<FilmTile>>>
+    // filmTileArray(imageY);
+    std::vector<std::unique_ptr<FilmTile>> filmTileArray;
     for (int y = 0; y < imageY; ++y) {
         for (int x = 0; x < imageX; ++x) {
             // Compute sample bounds for pixel
@@ -416,22 +418,22 @@ void SamplerIntegrator::Render(const Scene &scene) {
             int y1 = std::min(y0 + tileSize, sampleBounds.pMax.y);
             // size of tileBounds (1,1) for pixel-based loop
             Bounds2i tileBounds(Point2i(x0, y0), Point2i(x1, y1));
-            filmTileArray[y].push_back(camera->film->GetFilmTile(tileBounds));
+            filmTileArray.push_back(camera->film->GetFilmTile(tileBounds));
         }
     }
 
     std::vector<PixelEfficiency> efficiencyList;
-    ParamSet param;
-    // set maximum spp with arbitrary larget number
-    int idata[1] = {1000000};
-    param.AddInt("pixelsamples", std::unique_ptr<int[]>(idata), 1);
-    auto basicSampler = CreateRandomSampler(param);
-    for (int y = 0; y < imageY; ++y) {
-        for (int x = 0; x < imageX; ++x) {
-            std::shared_ptr<Sampler> s = basicSampler->Clone(y * imageX + x);
-            s->StartPixel(Point2i(x, y));
-            PixelEfficiency pEff(Point2i(x, y), s);
-            efficiencyList.push_back(pEff);
+    {
+        // set maximum spp with arbitrary larget number
+        auto basicSampler = std::unique_ptr<Sampler>(new RandomSampler(1000000));
+        for (int y = 0; y < imageY; ++y) {
+            for (int x = 0; x < imageX; ++x) {
+                std::shared_ptr<Sampler> s =
+                    basicSampler->Clone(y * imageX + x);
+                s->StartPixel(Point2i(x, y));
+                PixelEfficiency pEff(Point2i(x, y), s);
+                efficiencyList.push_back(pEff);
+            }
         }
     }
 
@@ -481,7 +483,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     clock_t localTime, localStart = clock();
                     auto radianceValues = processPixel(
                         pixel, remainingSamples[pixelIndex], scene, tileSampler,
-                        arena, filmTileArray[pixel.y][pixel.x]);
+                        arena, filmTileArray[pixelIndex]);
                     localTime = std::clock() - localStart;
 
 #ifdef ADAPTIVE_SAMPLING
@@ -627,10 +629,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
 #endif
 
     // Merge image tile into _Film_
-    for (auto &arr : filmTileArray) {
-        for (auto &filmTile : arr) {
-            camera->film->MergeFilmTile(std::move(filmTile));
-        }
+    for (auto &filmTile : filmTileArray) {
+        camera->film->MergeFilmTile(std::move(filmTile));
     }
 
     std::cout << "Rendering finished" << std::endl;
