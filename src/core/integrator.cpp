@@ -610,7 +610,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
     }
 
     auto timeIndicator =
-        std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + "_raynum.txt";
+        std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + ".txt";
     writeText(timeIndicator.c_str(), totalSampleNum, Point2i(256, 256), OFFSET);
     /*writeText("raynum.txt", totalSampleNum, Point2i(256, 256), OFFSET);
     writeText("variance.txt", varianceMap, Point2i(256, 256), OFFSET);
