@@ -38,6 +38,7 @@
 #include <numeric>
 #include "camera.h"
 #include "film.h"
+#include "hj.h"
 #include "imageio.h"
 #include "integrator.h"
 #include "interaction.h"
@@ -234,81 +235,6 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
         new Distribution1D(&lightPower[0], lightPower.size()));
 }
 
-template <typename T>
-T getVariance(std::vector<T> &arr, T mean) {
-    return std::accumulate(arr.begin(), arr.end(), T(0.f),
-                           [&mean](const T &a, const T &b) {
-                               // std::cout << a << ", " << b << std::endl;
-                               return a + (b - mean) * (b - mean);
-                           }) /
-           arr.size();
-}
-
-template <typename T>
-void writeImage(const char filename[], std::vector<T> &values, Point2i res,
-                const int OFFSET) {
-    std::unique_ptr<Float[]> rgb(new Float[3 * res.x * res.y]);
-
-    auto minmax = std::minmax_element(values.begin(), values.end());
-    Float maxValue = *minmax.second;
-    Float minValue = *minmax.first;
-    for (int i = 0; i < res.y; ++i) {
-        for (int j = 0; j < res.x; ++j) {
-            int ind = i * res.x + j;
-            rgb[3 * ind + 0] = Float(values[OFFSET + ind]);
-            rgb[3 * ind + 1] = Float(values[OFFSET + ind]);
-            rgb[3 * ind + 2] = Float(values[OFFSET + ind]);
-        }
-    }
-
-    char newfilename[255];
-    sprintf(newfilename, "stat_[%.4f, %.4f]_%s", minValue, maxValue, filename);
-    pbrt::WriteImage(newfilename, &rgb[0],
-                     Bounds2i(Point2i(0, 0), Point2i(res.x, res.y)),
-                     Point2i(res.x, res.y));
-}
-
-template <typename T>
-void writeText(const char filename[], std::vector<T> &values, Point2i res,
-               const int OFFSET) {
-    char newfilename[255];
-    sprintf(newfilename, "stat_%s", filename);
-    std::ofstream out(newfilename);
-    for (int i = OFFSET; i < values.size(); ++i) {
-        out << values[i] << std::endl;
-    }
-    out.close();
-}
-
-struct PixelEfficiency {
-    Point2i pixel;
-    std::shared_ptr<Sampler> sampler;
-    uint32_t n;
-    Float mean;
-    Float variance;
-    Float time;
-    Float efficiency;
-
-    PixelEfficiency(Point2i _pixel, std::shared_ptr<Sampler> _sampler)
-        : pixel(_pixel),
-          sampler(_sampler),
-          n(0),
-          mean(Float(0)),
-          variance(Float(0)),
-          time(Float(0)),
-          efficiency(Float(0)) {}
-
-    void update(uint32_t m, Float mMean, Float mVariance, Float mTime) {
-        mean = (n * mean + m * mMean) / (m + n);
-        variance =
-            (n * (variance + mean * mean) + m * (mVariance + mMean * mMean)) /
-                (m + n) -
-            mean * mean;
-        time = (n * time + m * mTime) / (m + n);
-        n += m;
-    }
-};
-
 std::vector<Spectrum> SamplerIntegrator::processPixel(
     Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
@@ -386,258 +312,327 @@ void SamplerIntegrator::Render(const Scene &scene) {
     // Compute number of tiles, _nTiles_, to use for parallel rendering
     Bounds2i sampleBounds = camera->film->GetSampleBounds();
     Vector2i sampleExtent = sampleBounds.Diagonal();
+    int imageX = sampleBounds.pMax[0];
+    int imageY = sampleBounds.pMax[1];
     const int tileSize = 1;
     Point2i nTiles((sampleExtent.x + tileSize - 1) / tileSize,
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
-    const int SPP = sampler->samplesPerPixel;
-    const int BATCH_SIZE = SPP / 2;  // SPP / 2
-    if (SPP % BATCH_SIZE != 0) {
-        printf("SPP(%d) is not dividible by BATCH_SIZE(%d)",
-               sampler->samplesPerPixel, BATCH_SIZE);
-        exit(1);
-    }
-    const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
-    int imageX = sampleBounds.pMax[0];
-    int imageY = sampleBounds.pMax[1];
-    // to exclude cold cache latency, remove some rows
-    const int START_ROW = 2;
-    const int OFFSET = START_ROW * imageX;
-    const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * (imageY - START_ROW);
-    const int MAX_SPP = SPP * 8;
+    std::string filename = camera->film->filename;
+    const std::string PATH_GT = "cornell_depth1_ss_gt.exr";
 
-    // std::vector<std::vector<std::unique_ptr<FilmTile>>>
-    // filmTileArray(imageY);
-    std::vector<std::unique_ptr<FilmTile>> filmTileArray;
-    for (int y = 0; y < imageY; ++y) {
-        for (int x = 0; x < imageX; ++x) {
-            // Compute sample bounds for pixel
-            int x0 = sampleBounds.pMin.x + x * tileSize;
-            int x1 = std::min(x0 + tileSize, sampleBounds.pMax.x);
-            int y0 = sampleBounds.pMin.y + y * tileSize;
-            int y1 = std::min(y0 + tileSize, sampleBounds.pMax.y);
-            // size of tileBounds (1,1) for pixel-based loop
-            Bounds2i tileBounds(Point2i(x0, y0), Point2i(x1, y1));
-            filmTileArray.push_back(camera->film->GetFilmTile(tileBounds));
+    Executor exec;
+
+    // dummy params to remove cold cache
+    exec.addParams({128, ASMethod::Rvariance, 0.0, 128 * 8, 2});
+
+    exec.addParams({158, ASMethod::Efficiency, 0.0, 128 * 8, 2});
+    exec.addParams({158, ASMethod::Efficiency, 25.0, 128 * 8, 2});
+    exec.addParams({158, ASMethod::Efficiency, 10.0, 128 * 8, 2});
+    exec.addParams({158, ASMethod::Efficiency, 5.0, 128 * 8, 2});
+    exec.addParams({158, ASMethod::Efficiency, 1.0, 128 * 8, 2});
+
+    /*exec.addParams({154, ASMethod::Efficiency, 0.0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 0.0, 2});
+
+    exec.addParams({154, ASMethod::Efficiency, 10.0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 10.0, 2});
+
+    exec.addParams({154, ASMethod::Efficiency, 5.0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 5.0, 2});
+
+    exec.addParams({154, ASMethod::Efficiency, 1.0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 1.0, 2});*/
+
+    for (int exe = 0; exe < exec.getNum(); ++exe) {
+        ExecutionParams params = exec.getParams(exe);
+        std::string path = "results\\" + params.getDirectoryName() + "\\";
+        createDirectory(path);
+
+        int SPP = params.spp;
+        camera->film->filename = path + params.getDirectoryName() + ".exr";
+
+        // Film should be clear before processing on new params
+        camera->film->Clear();
+
+        const int BATCH_SIZE = SPP / params.batch;
+        if (SPP % BATCH_SIZE != 0) {
+            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)",
+                   sampler->samplesPerPixel, BATCH_SIZE);
+            exit(1);
         }
-    }
+        const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
 
-    std::vector<PixelEfficiency> efficiencyList;
-    {
-        // set maximum spp with arbitrary larget number
-        auto basicSampler = std::unique_ptr<Sampler>(new RandomSampler(1000000));
+        // to exclude cold cache latency, remove some rows
+        const int START_ROW = 2;
+        const int OFFSET = START_ROW * imageX;
+        const int SAMPLES_PER_BATCH =
+            BATCH_SIZE * imageX * (imageY - START_ROW);
+
+        // std::vector<std::vector<std::unique_ptr<FilmTile>>>
+        // filmTileArray(imageY);
+        std::vector<std::unique_ptr<FilmTile>> filmTileArray;
         for (int y = 0; y < imageY; ++y) {
             for (int x = 0; x < imageX; ++x) {
-                std::shared_ptr<Sampler> s =
-                    basicSampler->Clone(y * imageX + x);
-                s->StartPixel(Point2i(x, y));
-                PixelEfficiency pEff(Point2i(x, y), s);
-                efficiencyList.push_back(pEff);
+                // Compute sample bounds for pixel
+                int x0 = sampleBounds.pMin.x + x * tileSize;
+                int x1 = std::min(x0 + tileSize, sampleBounds.pMax.x);
+                int y0 = sampleBounds.pMin.y + y * tileSize;
+                int y1 = std::min(y0 + tileSize, sampleBounds.pMax.y);
+                // size of tileBounds (1,1) for pixel-based loop
+                Bounds2i tileBounds(Point2i(x0, y0), Point2i(x1, y1));
+                filmTileArray.push_back(camera->film->GetFilmTile(tileBounds));
             }
         }
-    }
 
-    std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
-    std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
+        std::vector<PixelEfficiency> efficiencyList;
+        {
+            // set maximum spp with arbitrary larget number
+            auto basicSampler =
+                std::unique_ptr<Sampler>(new RandomSampler(1000000));
+            for (int y = 0; y < imageY; ++y) {
+                for (int x = 0; x < imageX; ++x) {
+                    std::shared_ptr<Sampler> s =
+                        basicSampler->Clone(y * imageX + x);
+                    s->StartPixel(Point2i(x, y));
+                    PixelEfficiency pEff(Point2i(x, y), s);
+                    efficiencyList.push_back(pEff);
+                }
+            }
+        }
 
-    clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
-            overheadStart;
-    std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
-    {
-        // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
-        for (int batch = 1; batch <= BATCH_NUM; ++batch) {
-            ParallelFor(
-                [&](int64_t iter) {
-                    uint32_t pixelIndex =
-                        efficiencyList[iter].pixel.y * imageX +
-                        efficiencyList[iter].pixel.x;
-                    auto &pEff = efficiencyList[iter];
-                    Point2i pixel = pEff.pixel;
+        std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
+        std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
 
-                    // do not proceed
-                    if (remainingSamples[pixelIndex] == 0) return;
+        clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
+                overheadStart;
+        std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
+        {
+            // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
+            for (int batch = 1; batch <= BATCH_NUM; ++batch) {
+                ParallelFor(
+                    [&](int64_t iter) {
+                        auto &pEff = efficiencyList[iter];
+                        uint32_t pixelIndex =
+                            pEff.pixel.y * imageX + pEff.pixel.x;
+                        Point2i pixel = pEff.pixel;
 
-                    // count samples
-                    globalSampleCounter[ThreadIndex] +=
-                        remainingSamples[pixelIndex];
+                        // do not proceed
+                        if (remainingSamples[pixelIndex] == 0) return;
 
-                    // Allocate _MemoryArena_ for pixel
-                    MemoryArena arena;
+                        // count samples
+                        globalSampleCounter[ThreadIndex] +=
+                            remainingSamples[pixelIndex];
 
-                    // Get sampler instance for pixel
-                    std::shared_ptr<Sampler> &tileSampler = pEff.sampler;
+                        // Allocate _MemoryArena_ for pixel
+                        MemoryArena arena;
 
-                    {
-                        // ProfilePhase pp(Prof::StartPixel);
-                        // tileSampler->StartPixel(pixel);
-                    }
+                        // Get sampler instance for pixel
+                        std::shared_ptr<Sampler> &tileSampler = pEff.sampler;
 
-                    // Do this check after the StartPixel() call; this keeps
-                    // the usage of RNG values from (most) Samplers that use
-                    // RNGs consistent, which improves reproducability /
-                    // debugging.
-                    if (!InsideExclusive(pixel, pixelBounds)) {
-                        return;
-                    }
+                        {
+                            // ProfilePhase pp(Prof::StartPixel);
+                            // tileSampler->StartPixel(pixel);
+                        }
 
-                    clock_t localTime, localStart = clock();
-                    auto radianceValues = processPixel(
-                        pixel, remainingSamples[pixelIndex], scene, tileSampler,
-                        arena, filmTileArray[pixelIndex]);
-                    localTime = std::clock() - localStart;
+                        // Do this check after the StartPixel() call; this keeps
+                        // the usage of RNG values from (most) Samplers that use
+                        // RNGs consistent, which improves reproducability /
+                        // debugging.
+                        if (!InsideExclusive(pixel, pixelBounds)) {
+                            return;
+                        }
+
+                        clock_t localTime, localStart = clock();
+                        auto radianceValues = processPixel(
+                            pixel, remainingSamples[pixelIndex], scene,
+                            tileSampler, arena, filmTileArray[pixelIndex]);
+                        localTime = std::clock() - localStart;
 
 #ifdef ADAPTIVE_SAMPLING
-                    // mean and variance of this batch
-                    Spectrum sMean =
-                        std::accumulate(radianceValues.begin(),
-                                        radianceValues.end(), Spectrum(0.f)) /
-                        radianceValues.size();
-                    Spectrum sVariance = getVariance(radianceValues, sMean);
-                    Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
-                    Float fVariance =
-                        (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
+                        // mean and variance of this batch
+                        Spectrum sMean = std::accumulate(radianceValues.begin(),
+                                                         radianceValues.end(),
+                                                         Spectrum(0.f)) /
+                                         radianceValues.size();
+                        Spectrum sVariance = getVariance(radianceValues, sMean);
 
-                    pEff.update(radianceValues.size(), fMean, fVariance,
-                                localTime);
+                        Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
+                        Float fVariance =
+                            (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
 
-                    /*if (pEff.variance > 1) {
-                        pEff.variance = 1;
-                    }*/
+                        pEff.update(radianceValues.size(), fMean, fVariance,
+                                    localTime);
 
-                    // global efficiency
-                    Float relativeVariance =
-                        (pEff.variance / pow(pEff.mean + 0.0001, 2.0));
-                    pEff.efficiency =
-                        relativeVariance / std::max(localTime, clock_t(1));
+                        if (params.clampThreshold != 0) {
+                            if (pEff.variance > params.clampThreshold) {
+                                pEff.variance = params.clampThreshold;
+                            }
+                        }
+
+                        // global efficiency
+                        Float relativeVariance =
+                            (pEff.variance / pow(pEff.mean + 0.0001, 2.0));
+
+                        // different metrics
+                        switch (params.method) {
+                        case ASMethod::Rvariance:
+                            pEff.efficiency = relativeVariance;
+                            break;
+                        case ASMethod::Efficiency:
+                            pEff.efficiency = relativeVariance /
+                                              std::max(localTime, clock_t(1));
+                            break;
+                        }
 
 #endif
 
-                    // counter[pixelIndex] = std::clock() - start;
-                },
-                efficiencyList.size());
+                        // counter[pixelIndex] = std::clock() - start;
+                    },
+                    efficiencyList.size());
 
-            overheadStart = clock();
+                overheadStart = clock();
 
 #ifdef ADAPTIVE_SAMPLING
-            // do not sort at last iteration
-            if (batch == BATCH_NUM) {
-                break;
-            }
+                // do not sort at last iteration
+                if (batch == BATCH_NUM) {
+                    break;
+                }
 
-            printf("[Batch%d]\n", batch);
+                printf("[Batch%d]\n", batch);
 
-            // sort by efficiency
-            std::sort(
-                efficiencyList.begin() + OFFSET, efficiencyList.end(),
-                [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
-                    return lhs.efficiency > rhs.efficiency;
-                });
+                // sort by efficiency
+                std::sort(
+                    efficiencyList.begin() + OFFSET, efficiencyList.end(),
+                    [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
+                        return lhs.efficiency > rhs.efficiency;
+                    });
 
-            Float effSum = std::accumulate(
-                efficiencyList.begin() + OFFSET, efficiencyList.end(), 0.0,
-                [](const Float &a, const PixelEfficiency &b) {
-                    return a + b.efficiency;
-                });
+                Float effSum = std::accumulate(
+                    efficiencyList.begin() + OFFSET, efficiencyList.end(), 0.0,
+                    [](const Float &a, const PixelEfficiency &b) {
+                        return a + b.efficiency;
+                    });
 
-            std::cout << "most efficient pixel: "
-                      << efficiencyList[OFFSET].pixel << std::endl;
-            printf("efficiency max(%f), sum(%f)\n",
-                   efficiencyList[OFFSET].efficiency, effSum);
-            printf("mean[%f], variance[%f]\n", efficiencyList[OFFSET].mean,
-                   efficiencyList[OFFSET].variance);
+                std::cout << "most efficient pixel: "
+                          << efficiencyList[OFFSET].pixel << std::endl;
+                printf("efficiency max(%f), sum(%f)\n",
+                       efficiencyList[OFFSET].efficiency, effSum);
+                printf("mean[%f], variance[%f]\n", efficiencyList[OFFSET].mean,
+                       efficiencyList[OFFSET].variance);
 
-            uint32_t sampleCounter = 0;
-            for (size_t i = OFFSET; i < efficiencyList.size(); ++i) {
-                auto &pEff = efficiencyList[i];
-                int ind = pEff.pixel.y * imageX + pEff.pixel.x;
-                Float ratio = pEff.efficiency / effSum;
-                pEff.sampler->SetSampleNumber(0);
-                int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
+                uint32_t sampleCounter = 0;
+                for (size_t i = OFFSET; i < efficiencyList.size(); ++i) {
+                    auto &pEff = efficiencyList[i];
+                    int ind = pEff.pixel.y * imageX + pEff.pixel.x;
+                    Float ratio = pEff.efficiency / effSum;
+                    pEff.sampler->SetSampleNumber(0);
+                    int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
 
-                /*if (candidate > MAX_SPP) {
-                    candidate = MAX_SPP;
-                }*/
+                    if (params.maxSPP > 0 && candidate > params.maxSPP) {
+                        candidate = params.maxSPP;
+                    }
 
-                remainingSamples[ind] = candidate;
-                sampleCounter += candidate;
+                    remainingSamples[ind] = candidate;
+                    sampleCounter += candidate;
 
-                totalSampleNum[ind] += candidate;
-            }
+                    totalSampleNum[ind] += candidate;
+                }
 
-            uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
-            printf("samples_per_batch(%d), sampleCounter(%ld), leftovers(%d)\n",
-                   SAMPLES_PER_BATCH, sampleCounter, leftovers);
+                uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
+                printf(
+                    "samples_per_batch(%d), sampleCounter(%ld), "
+                    "leftovers(%d)\n",
+                    SAMPLES_PER_BATCH, sampleCounter, leftovers);
 
-            int ind = OFFSET;
-            for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
-                if (ind >= efficiencyList.size()) ind = OFFSET;
-                remainingSamples[efficiencyList[ind].pixel.y * imageX +
-                                 efficiencyList[ind].pixel.x]++;
-            }
+                int ind = OFFSET;
+                for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
+                    if (ind >= efficiencyList.size()) ind = OFFSET;
+                    remainingSamples[efficiencyList[ind].pixel.y * imageX +
+                                     efficiencyList[ind].pixel.x]++;
+                }
 
 #else
-            for (size_t i = OFFSET; i < remainingSamples.size(); ++i) {
-                auto &pEff = efficiencyList[i];
-                remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] =
-                    BATCH_SIZE;
-            }
+                for (size_t i = OFFSET; i < remainingSamples.size(); ++i) {
+                    auto &pEff = efficiencyList[i];
+                    remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] =
+                        BATCH_SIZE;
+                }
 #endif
-            overheadTime += clock() - overheadStart;
+                overheadTime += clock() - overheadStart;
+            }
+            // reporter.Done();
         }
-        // reporter.Done();
-    }
 
 #ifdef ADAPTIVE_SAMPLING
-    // [Stats] ==================================================
-    globalTime = std::clock() - globalStart - overheadTime;
-    printf("------------[Statistics]------------\n");
-    printf("Time for overhead: %fs\n", overheadTime / Float(CLOCKS_PER_SEC));
-    printf("Time for loop: %fs\n\n", globalTime / Float(CLOCKS_PER_SEC));
-    printf("Counted samples: %u\n",
-           std::accumulate(globalSampleCounter.begin(),
-                           globalSampleCounter.end(), 0));
+        // [Stats] ==================================================
+        globalTime = std::clock() - globalStart - overheadTime;
+        printf("------------[Statistics]------------\n");
+        printf("Time for overhead: %fs\n",
+               overheadTime / Float(CLOCKS_PER_SEC));
+        printf("Time for loop: %fs\n\n", globalTime / Float(CLOCKS_PER_SEC));
+        printf("Counted samples: %u\n",
+               std::accumulate(globalSampleCounter.begin(),
+                               globalSampleCounter.end(), 0));
+        ExecutionResult result;
+        result.time = globalTime / Float(CLOCKS_PER_SEC);
+        exec.addResult(result);
 
-    // [PRINT] ==================================================
-    std::vector<Float> varianceMap(imageX * imageY);
-    std::vector<Float> relVarianceMap(imageX * imageY);
-    std::vector<Float> efficiencyMap(imageX * imageY);
-    std::vector<Float> timeMap(imageX * imageY);
+        // [PRINT] ==================================================
+        std::vector<Float> varianceMap(imageX * imageY);
+        std::vector<Float> relVarianceMap(imageX * imageY);
+        std::vector<Float> efficiencyMap(imageX * imageY);
+        std::vector<Float> timeMap(imageX * imageY);
 
-    for (auto pEff : efficiencyList) {
-        varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance;
-        relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
-            pEff.variance / pow(pEff.mean + 0.0001, 2.0);
-        efficiencyMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.efficiency;
-        timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
-    }
+        for (auto pEff : efficiencyList) {
+            varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance;
+            relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
+                pEff.variance / pow(pEff.mean + 0.0001, 2.0);
+            efficiencyMap[pEff.pixel.y * imageX + pEff.pixel.x] =
+                pEff.efficiency;
+            timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
+        }
 
-    auto timeIndicator =
-        std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + ".txt";
-    writeText(timeIndicator.c_str(), totalSampleNum, Point2i(256, 256), OFFSET);
-    /*writeText("raynum.txt", totalSampleNum, Point2i(256, 256), OFFSET);
-    writeText("variance.txt", varianceMap, Point2i(256, 256), OFFSET);
-    writeText("relVariance.txt", relVarianceMap, Point2i(256, 256), OFFSET);
-    writeText("efficiency.txt", efficiencyMap, Point2i(256, 256), OFFSET);
-    writeText("time.txt", timeMap, Point2i(256, 256), OFFSET);*/
+        auto timeIndicator =
+            std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + ".txt";
+        writeText(path, timeIndicator.c_str(), std::vector<int>(), Point2i(),
+                  0);
+        /*writeText(path + "raynum.txt", totalSampleNum, Point2i(256, 256),
+        OFFSET); writeText(path + "variance.txt", varianceMap, Point2i(256,
+        256), OFFSET); writeText(path + "relVariance.txt", relVarianceMap,
+        Point2i(256, 256), OFFSET); writeText(path + "efficiency.txt",
+        efficiencyMap, Point2i(256, 256), OFFSET); writeText(path + "time.txt",
+        timeMap, Point2i(256, 256), OFFSET);*/
 
-    // [Create Image] =====================================
-    writeImage("raynum.exr", totalSampleNum, Point2i(256, 256), OFFSET);
-    writeImage("variance.exr", varianceMap, Point2i(256, 256), OFFSET);
-    writeImage("relVariance.exr", relVarianceMap, Point2i(256, 256), OFFSET);
-    writeImage("efficiency.exr", efficiencyMap, Point2i(256, 256), OFFSET);
-    writeImage("time.exr", timeMap, Point2i(256, 256), OFFSET);
+        // [Create Image] =====================================
+        writeImage(path, "raynum.exr", totalSampleNum, Point2i(256, 256),
+                   OFFSET);
+        writeImage(path, "variance.exr", varianceMap, Point2i(256, 256),
+                   OFFSET);
+        writeImage(path, "relVariance.exr", relVarianceMap, Point2i(256, 256),
+                   OFFSET);
+        writeImage(path, "efficiency.exr", efficiencyMap, Point2i(256, 256),
+                   OFFSET);
+        writeImage(path, "time.exr", timeMap, Point2i(256, 256), OFFSET);
 #endif
 
-    // Merge image tile into _Film_
-    for (auto &filmTile : filmTileArray) {
-        camera->film->MergeFilmTile(std::move(filmTile));
+        // Merge image tile into _Film_
+        for (auto &filmTile : filmTileArray) {
+            camera->film->MergeFilmTile(std::move(filmTile));
+        }
+
+        // Save final image after rendering
+        camera->film->WriteImage();
+
+        auto mse = diff2(PATH_GT, camera->film->filename);
+        // printf("mse(%f), rmse(%f)\n", mse.first, mse.second);
+        char tmp[255];
+        sprintf(tmp, "mse(%.10f),rmse(%.9f).txt", mse.first, mse.second);
+        writeText(path, tmp, std::vector<Float>(), Point2i(), 0);
     }
 
     std::cout << "Rendering finished" << std::endl;
     LOG(INFO) << "Rendering finished";
-
-    // Save final image after rendering
-    camera->film->WriteImage();
 }
 
 Spectrum SamplerIntegrator::SpecularReflect(

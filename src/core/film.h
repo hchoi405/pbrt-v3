@@ -75,7 +75,7 @@ class Film {
     const Point2i fullResolution;
     const Float diagonal;
     std::unique_ptr<Filter> filter;
-    const std::string filename;
+    std::string filename;
     Bounds2i croppedPixelBounds;
 
   private:
