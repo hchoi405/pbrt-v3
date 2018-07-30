@@ -364,10 +364,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
 
         // to exclude cold cache latency, remove some rows
-        const int START_ROW = 2;
-        const int OFFSET = START_ROW * imageX;
-        const int SAMPLES_PER_BATCH =
-            BATCH_SIZE * imageX * (imageY - START_ROW);
+        const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * imageY;
 
         // std::vector<std::vector<std::unique_ptr<FilmTile>>>
         // filmTileArray(imageY);
@@ -503,34 +500,35 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
                 // sort by efficiency
                 std::sort(
-                    efficiencyList.begin() + OFFSET, efficiencyList.end(),
+                    efficiencyList.begin(), efficiencyList.end(),
                     [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
                         return lhs.efficiency > rhs.efficiency;
                     });
 
                 Float effSum = std::accumulate(
-                    efficiencyList.begin() + OFFSET, efficiencyList.end(), 0.0,
+                    efficiencyList.begin(), efficiencyList.end(), 0.0,
                     [](const Float &a, const PixelEfficiency &b) {
                         return a + b.efficiency;
                     });
 
-                std::cout << "most efficient pixel: "
-                          << efficiencyList[OFFSET].pixel << std::endl;
+                std::cout << "most efficient pixel: " << efficiencyList[0].pixel
+                          << std::endl;
                 printf("efficiency max(%f), sum(%f)\n",
-                       efficiencyList[OFFSET].efficiency, effSum);
-                printf("mean[%f], variance[%f]\n", efficiencyList[OFFSET].mean,
-                       efficiencyList[OFFSET].variance);
+                       efficiencyList[0].efficiency, effSum);
+                printf("mean[%f], variance[%f]\n", efficiencyList[0].mean,
+                       efficiencyList[0].variance);
 
                 uint32_t sampleCounter = 0;
-                for (size_t i = OFFSET; i < efficiencyList.size(); ++i) {
+                for (size_t i = 0; i < efficiencyList.size(); ++i) {
                     auto &pEff = efficiencyList[i];
                     int ind = pEff.pixel.y * imageX + pEff.pixel.x;
                     Float ratio = pEff.efficiency / effSum;
                     pEff.sampler->SetSampleNumber(0);
                     int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
 
-                    if (params.maxSPP > 0 && candidate > params.maxSPP) {
-                        candidate = params.maxSPP;
+                    if (params.maxSppRatio > 0 &&
+                        candidate > params.spp * params.maxSppRatio) {
+                        candidate = params.spp * params.maxSppRatio;
                     }
 
                     remainingSamples[ind] = candidate;
@@ -545,15 +543,15 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     "leftovers(%d)\n",
                     SAMPLES_PER_BATCH, sampleCounter, leftovers);
 
-                int ind = OFFSET;
+                int ind = 0;
                 for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
-                    if (ind >= efficiencyList.size()) ind = OFFSET;
+                    if (ind >= efficiencyList.size()) ind = 0;
                     remainingSamples[efficiencyList[ind].pixel.y * imageX +
                                      efficiencyList[ind].pixel.x]++;
                 }
 
 #else
-                for (size_t i = OFFSET; i < remainingSamples.size(); ++i) {
+                for (size_t i = 0; i < remainingSamples.size(); ++i) {
                     auto &pEff = efficiencyList[i];
                     remainingSamples[pEff.pixel.y * imageX + pEff.pixel.x] =
                         BATCH_SIZE;
@@ -598,22 +596,19 @@ void SamplerIntegrator::Render(const Scene &scene) {
         writeText(path, timeIndicator.c_str(), std::vector<int>(), Point2i(),
                   0);
         /*writeText(path + "raynum.txt", totalSampleNum, Point2i(256, 256),
-        OFFSET); writeText(path + "variance.txt", varianceMap, Point2i(256,
-        256), OFFSET); writeText(path + "relVariance.txt", relVarianceMap,
-        Point2i(256, 256), OFFSET); writeText(path + "efficiency.txt",
-        efficiencyMap, Point2i(256, 256), OFFSET); writeText(path + "time.txt",
-        timeMap, Point2i(256, 256), OFFSET);*/
+        0); writeText(path + "variance.txt", varianceMap, Point2i(256,
+        256), 0); writeText(path + "relVariance.txt", relVarianceMap,
+        Point2i(256, 256), 0); writeText(path + "efficiency.txt",
+        efficiencyMap, Point2i(256, 256), 0); writeText(path + "time.txt",
+        timeMap, Point2i(256, 256), 0);*/
 
         // [Create Image] =====================================
-        writeImage(path, "raynum.exr", totalSampleNum, Point2i(256, 256),
-                   OFFSET);
-        writeImage(path, "variance.exr", varianceMap, Point2i(256, 256),
-                   OFFSET);
+        writeImage(path, "raynum.exr", totalSampleNum, Point2i(256, 256), 0);
+        writeImage(path, "variance.exr", varianceMap, Point2i(256, 256), 0);
         writeImage(path, "relVariance.exr", relVarianceMap, Point2i(256, 256),
-                   OFFSET);
-        writeImage(path, "efficiency.exr", efficiencyMap, Point2i(256, 256),
-                   OFFSET);
-        writeImage(path, "time.exr", timeMap, Point2i(256, 256), OFFSET);
+                   0);
+        writeImage(path, "efficiency.exr", efficiencyMap, Point2i(256, 256), 0);
+        writeImage(path, "time.exr", timeMap, Point2i(256, 256), 0);
 #endif
 
         // Merge image tile into _Film_

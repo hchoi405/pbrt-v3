@@ -51,7 +51,7 @@ struct ExecutionParams {
     int spp;
     ASMethod method;
     Float clampThreshold;
-    Float maxSPP;
+    int maxSppRatio;
     int batch;
     ExecutionResult result;
 
@@ -66,8 +66,8 @@ struct ExecutionParams {
             methodName = std::string("eff");
             break;
         }
-        sprintf(tmp, "spp%d_%s_clamp%02.1f_max%02.1f", spp, methodName.c_str(),
-                clampThreshold, maxSPP);
+        sprintf(tmp, "spp%d_%s_clamp%02.1f_max%d", spp, methodName.c_str(),
+                clampThreshold, maxSppRatio);
         return std::string(tmp);
     }
 };
