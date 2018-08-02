@@ -66,7 +66,7 @@ struct ExecutionParams {
             methodName = std::string("eff");
             break;
         }
-        sprintf(tmp, "spp%d_%s_clamp%02.1f_max%d", spp, methodName.c_str(),
+        sprintf(tmp, "spp%d_%s_clamp%.4f_max%d", spp, methodName.c_str(),
                 clampThreshold, maxSppRatio);
         return std::string(tmp);
     }
@@ -128,8 +128,8 @@ void writeImage(const char path[], const char filename[],
     }
 
     char newfilename[255];
-    sprintf(newfilename, "%sstat_[%.4f,%.4f]_%s", path, minValue, maxValue,
-            filename);
+    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path, filename, minValue,
+            maxValue);
     pbrt::WriteImage(newfilename, &rgb[0],
                      Bounds2i(Point2i(0, 0), Point2i(res.x, res.y)),
                      Point2i(res.x, res.y));
@@ -145,7 +145,12 @@ template <typename T>
 void writeText(const char path[], const char filename[], std::vector<T> &values,
                Point2i res, const int OFFSET) {
     char newfilename[255];
-    sprintf(newfilename, "%sstat_%s", path, filename);
+
+	auto minmax = std::minmax_element(values.begin(), values.end());
+    Float maxValue = *minmax.second;
+    Float minValue = *minmax.first;
+
+    sprintf(newfilename, "%sstat_%s.txt", path, filename);
     std::ofstream out(newfilename);
     char tmp[255];
     for (int i = OFFSET; i < values.size(); ++i) {
@@ -220,4 +225,14 @@ std::pair<Float, Float> diff2(std::string gtPath, std::string in) {
     }
 
     return result;
+}
+
+template <typename T>
+std::vector<size_t> orderedIndice(std::vector<T> const &values) {
+    std::vector<size_t> indices(values.size());
+    std::iota(begin(indices), end(indices), static_cast<size_t>(0));
+
+    std::sort(begin(indices), end(indices),
+              [&](size_t a, size_t b) { return values[a] > values[b]; });
+    return indices;
 }

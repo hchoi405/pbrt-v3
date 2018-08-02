@@ -325,25 +325,19 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Executor exec;
 
     // dummy params to remove cold cache
-    exec.addParams({128, ASMethod::Rvariance, 0.0, 128 * 8, 2});
+    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
 
-    exec.addParams({158, ASMethod::Efficiency, 0.0, 128 * 8, 2});
-    exec.addParams({158, ASMethod::Efficiency, 25.0, 128 * 8, 2});
-    exec.addParams({158, ASMethod::Efficiency, 10.0, 128 * 8, 2});
-    exec.addParams({158, ASMethod::Efficiency, 5.0, 128 * 8, 2});
-    exec.addParams({158, ASMethod::Efficiency, 1.0, 128 * 8, 2});
+    exec.addParams({154, ASMethod::Efficiency, 1.0, 0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
 
-    /*exec.addParams({154, ASMethod::Efficiency, 0.0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.0, 2});
+	exec.addParams({154, ASMethod::Efficiency, 0.9999, 0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 0.9999, 0, 2});
 
-    exec.addParams({154, ASMethod::Efficiency, 10.0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 10.0, 2});
+	exec.addParams({154, ASMethod::Efficiency, 0.999, 0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 0.999, 0, 2});
 
-    exec.addParams({154, ASMethod::Efficiency, 5.0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 5.0, 2});
-
-    exec.addParams({154, ASMethod::Efficiency, 1.0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 1.0, 2});*/
+    exec.addParams({154, ASMethod::Efficiency, 0.99, 0, 2});
+    exec.addParams({128, ASMethod::Rvariance, 0.99, 0, 2});
 
     for (int exe = 0; exe < exec.getNum(); ++exe) {
         ExecutionParams params = exec.getParams(exe);
@@ -401,6 +395,10 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
         std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
+        std::vector<uint32_t> globalNum(imageX * imageY, 0);
+        std::vector<Float> globalMean(imageX * imageY, 0);
+        std::vector<Float> globalVariance(imageX * imageY, 0);
+        std::vector<Float> globalLocalTime(imageX * imageY, 0);
 
         clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
                 overheadStart;
@@ -455,33 +453,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         Spectrum sVariance = getVariance(radianceValues, sMean);
 
                         Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
+                        globalMean[pixelIndex] = fMean;
                         Float fVariance =
                             (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
-
-                        pEff.update(radianceValues.size(), fMean, fVariance,
-                                    localTime);
-
-                        if (params.clampThreshold != 0) {
-                            if (pEff.variance > params.clampThreshold) {
-                                pEff.variance = params.clampThreshold;
-                            }
-                        }
-
-                        // global efficiency
-                        Float relativeVariance =
-                            (pEff.variance / pow(pEff.mean + 0.0001, 2.0));
-
-                        // different metrics
-                        switch (params.method) {
-                        case ASMethod::Rvariance:
-                            pEff.efficiency = relativeVariance;
-                            break;
-                        case ASMethod::Efficiency:
-                            pEff.efficiency = relativeVariance /
-                                              std::max(localTime, clock_t(1));
-                            break;
-                        }
-
+                        globalVariance[pixelIndex] = fVariance;
+                        globalLocalTime[pixelIndex] = localTime;
+                        globalNum[pixelIndex] = radianceValues.size();
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
@@ -494,6 +471,42 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 }
 
                 printf("[Batch%d]\n", batch);
+
+                // sort variance
+                auto indice = orderedIndice(globalVariance);
+
+                // clamp variance
+                int clampingNum = std::floor(efficiencyList.size() *
+                                             (1 - params.clampThreshold));
+                Float threshold = globalVariance[indice[clampingNum]];
+                for (size_t i = 0; i < clampingNum; ++i) {
+                    globalVariance[indice[i]] = threshold;
+                }
+
+                // Update global efficiency
+                std::for_each(
+                    efficiencyList.begin(), efficiencyList.end(),
+                    [&](PixelEfficiency &pEff) {
+                        int pixelIndex = pEff.pixel.x + pEff.pixel.y * imageX;
+                        pEff.update(globalNum[pixelIndex],
+                                    globalMean[pixelIndex],
+                                    globalVariance[pixelIndex],
+                                    globalLocalTime[pixelIndex]);
+
+                        Float relativeVariance =
+                            pEff.variance / pow(pEff.mean + 0.0001, 2.0);
+
+                        // different metrics
+                        switch (params.method) {
+                        case ASMethod::Rvariance:
+                            pEff.efficiency = relativeVariance;
+                            break;
+                        case ASMethod::Efficiency:
+                            pEff.efficiency =
+                                relativeVariance / std::max(pEff.time, 1.0);
+                            break;
+                        }
+                    });
 
                 // sort by efficiency
                 std::sort(
@@ -523,6 +536,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     pEff.sampler->SetSampleNumber(0);
                     int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
 
+                    // spp clamping
                     if (params.maxSppRatio > 0 &&
                         candidate > params.spp * params.maxSppRatio) {
                         candidate = params.spp * params.maxSppRatio;
@@ -552,12 +566,15 @@ void SamplerIntegrator::Render(const Scene &scene) {
             // reporter.Done();
         }
 
-        // [Stats] ==================================================
         globalTime = std::clock() - globalStart - overheadTime;
-        printf("------------[Statistics]------------\n");
+
+        // [Stats] ==================================================
+        printf("\n------------[Statistics]------------\n");
+        printf("Time: %fs\n", globalTime / Float(CLOCKS_PER_SEC));
         printf("Time for overhead: %fs\n",
                overheadTime / Float(CLOCKS_PER_SEC));
-        printf("Time for loop: %fs\n\n", globalTime / Float(CLOCKS_PER_SEC));
+        printf("Time without overhead: %fs\n",
+               (globalTime - overheadTime) / Float(CLOCKS_PER_SEC));
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
@@ -584,20 +601,22 @@ void SamplerIntegrator::Render(const Scene &scene) {
             std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + ".txt";
         writeText(path, timeIndicator.c_str(), std::vector<int>(), Point2i(),
                   0);
-        /*writeText(path + "raynum.txt", totalSampleNum, Point2i(256, 256),
-        0); writeText(path + "variance.txt", varianceMap, Point2i(256,
-        256), 0); writeText(path + "relVariance.txt", relVarianceMap,
-        Point2i(256, 256), 0); writeText(path + "efficiency.txt",
-        efficiencyMap, Point2i(256, 256), 0); writeText(path + "time.txt",
-        timeMap, Point2i(256, 256), 0);*/
+
+        // [Create Text] =====================================
+        // writeText(path, "raynum.txt", totalSampleNum, Point2i(256, 256), 0);
+        // writeText(path, "variance.txt", varianceMap, Point2i(256, 256), 0);
+        // writeText(path, "relVariance.txt", relVarianceMap, Point2i(256, 256),
+        //          0);
+        // writeText(path, "efficiency.txt", efficiencyMap, Point2i(256, 256),
+        // 0);
+        writeText(path, "time", timeMap, Point2i(256, 256), 0);
 
         // [Create Image] =====================================
-        writeImage(path, "raynum.exr", totalSampleNum, Point2i(256, 256), 0);
-        writeImage(path, "variance.exr", varianceMap, Point2i(256, 256), 0);
-        writeImage(path, "relVariance.exr", relVarianceMap, Point2i(256, 256),
-                   0);
-        writeImage(path, "efficiency.exr", efficiencyMap, Point2i(256, 256), 0);
-        writeImage(path, "time.exr", timeMap, Point2i(256, 256), 0);
+        writeImage(path, "raynum", totalSampleNum, Point2i(256, 256), 0);
+        writeImage(path, "variance", varianceMap, Point2i(256, 256), 0);
+        writeImage(path, "relVariance", relVarianceMap, Point2i(256, 256), 0);
+        writeImage(path, "efficiency", efficiencyMap, Point2i(256, 256), 0);
+        writeImage(path, "time", timeMap, Point2i(256, 256), 0);
 
         // Merge image tile into _Film_
         for (auto &filmTile : filmTileArray) {
