@@ -27,7 +27,7 @@ struct PixelEfficiency {
           time(Float(0)),
           efficiency(Float(0)) {}
 
-    void update(uint32_t m, Float mMean, Float mVariance, Float mTime) {
+    void updateStats(uint32_t m, Float mMean, Float mVariance, Float mTime) {
         Float mn = n + m;
         Float mnMean = (n * mean + m * mMean) / mn;
         Float mnVariance =
@@ -41,6 +41,20 @@ struct PixelEfficiency {
         this->variance = mnVariance;
         this->time = mnTime;
     }
+
+    void updateEfficiency(ASMethod method) {
+        Float relativeVariance = variance / pow(mean + 0.0001, 2.0);
+
+        // different metrics
+        switch (method) {
+        case ASMethod::Rvariance:
+            efficiency = relativeVariance;
+            break;
+        case ASMethod::Efficiency:
+            efficiency = relativeVariance / std::max(time, 1.0);
+            break;
+        }
+	}
 };
 
 struct ExecutionResult {
@@ -146,7 +160,7 @@ void writeText(const char path[], const char filename[], std::vector<T> &values,
                Point2i res, const int OFFSET) {
     char newfilename[255];
 
-	auto minmax = std::minmax_element(values.begin(), values.end());
+    auto minmax = std::minmax_element(values.begin(), values.end());
     Float maxValue = *minmax.second;
     Float minValue = *minmax.first;
 

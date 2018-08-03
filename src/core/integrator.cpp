@@ -235,6 +235,7 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
         new Distribution1D(&lightPower[0], lightPower.size()));
 }
 
+#ifdef ADAPTIVE_SAMPLING
 std::vector<Spectrum> SamplerIntegrator::processPixel(
     Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
@@ -301,10 +302,10 @@ std::vector<Spectrum> SamplerIntegrator::processPixel(
             }
         }
     }
+
     return radianceValues;
 }
 
-#ifdef ADAPTIVE_SAMPLING
 // SamplerIntegrator Method Definitions
 void SamplerIntegrator::Render(const Scene &scene) {
     Preprocess(scene, *sampler);
@@ -361,8 +362,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
         // to exclude cold cache latency, remove some rows
         const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * imageY;
 
-        // std::vector<std::vector<std::unique_ptr<FilmTile>>>
-        // filmTileArray(imageY);
         std::vector<std::unique_ptr<FilmTile>> filmTileArray;
         for (int y = 0; y < imageY; ++y) {
             for (int x = 0; x < imageX; ++x) {
@@ -395,10 +394,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
         std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
-        std::vector<uint32_t> globalNum(imageX * imageY, 0);
-        std::vector<Float> globalMean(imageX * imageY, 0);
         std::vector<Float> globalVariance(imageX * imageY, 0);
-        std::vector<Float> globalLocalTime(imageX * imageY, 0);
 
         clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
                 overheadStart;
@@ -453,12 +449,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         Spectrum sVariance = getVariance(radianceValues, sMean);
 
                         Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
-                        globalMean[pixelIndex] = fMean;
                         Float fVariance =
                             (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
                         globalVariance[pixelIndex] = fVariance;
-                        globalLocalTime[pixelIndex] = localTime;
-                        globalNum[pixelIndex] = radianceValues.size();
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
@@ -479,34 +472,14 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 int clampingNum = std::floor(efficiencyList.size() *
                                              (1 - params.clampThreshold));
                 Float threshold = globalVariance[indice[clampingNum]];
-                for (size_t i = 0; i < clampingNum; ++i) {
-                    globalVariance[indice[i]] = threshold;
-                }
 
-                // Update global efficiency
-                std::for_each(
-                    efficiencyList.begin(), efficiencyList.end(),
-                    [&](PixelEfficiency &pEff) {
-                        int pixelIndex = pEff.pixel.x + pEff.pixel.y * imageX;
-                        pEff.update(globalNum[pixelIndex],
-                                    globalMean[pixelIndex],
-                                    globalVariance[pixelIndex],
-                                    globalLocalTime[pixelIndex]);
-
-                        Float relativeVariance =
-                            pEff.variance / pow(pEff.mean + 0.0001, 2.0);
-
-                        // different metrics
-                        switch (params.method) {
-                        case ASMethod::Rvariance:
-                            pEff.efficiency = relativeVariance;
-                            break;
-                        case ASMethod::Efficiency:
-                            pEff.efficiency =
-                                relativeVariance / std::max(pEff.time, 1.0);
-                            break;
-                        }
-                    });
+                // Update efficiency
+                std::for_each(efficiencyList.begin(), efficiencyList.end(),
+                              [&threshold, &params](PixelEfficiency &pEff) {
+                                  if (pEff.variance > threshold)
+                                      pEff.variance = threshold;
+                                  pEff.updateEfficiency(params.method);
+                              });
 
                 // sort by efficiency
                 std::sort(
@@ -566,7 +539,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
             // reporter.Done();
         }
 
-        globalTime = std::clock() - globalStart - overheadTime;
+        globalTime = std::clock() - globalStart;
 
         // [Stats] ==================================================
         printf("\n------------[Statistics]------------\n");
@@ -597,17 +570,16 @@ void SamplerIntegrator::Render(const Scene &scene) {
             timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
         }
 
-        auto timeIndicator =
-            std::to_string(globalTime / Float(CLOCKS_PER_SEC)) + ".txt";
+        auto timeIndicator = std::to_string(globalTime / Float(CLOCKS_PER_SEC));
         writeText(path, timeIndicator.c_str(), std::vector<int>(), Point2i(),
                   0);
 
         // [Create Text] =====================================
-        // writeText(path, "raynum.txt", totalSampleNum, Point2i(256, 256), 0);
-        // writeText(path, "variance.txt", varianceMap, Point2i(256, 256), 0);
-        // writeText(path, "relVariance.txt", relVarianceMap, Point2i(256, 256),
+        // writeText(path, "raynum", totalSampleNum, Point2i(256, 256), 0);
+        // writeText(path, "variance", varianceMap, Point2i(256, 256), 0);
+        // writeText(path, "relVariance", relVarianceMap, Point2i(256, 256),
         //          0);
-        // writeText(path, "efficiency.txt", efficiencyMap, Point2i(256, 256),
+        // writeText(path, "efficiency", efficiencyMap, Point2i(256, 256),
         // 0);
         writeText(path, "time", timeMap, Point2i(256, 256), 0);
 
@@ -629,7 +601,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         auto mse = diff2(PATH_GT, camera->film->filename);
         // printf("mse(%f), rmse(%f)\n", mse.first, mse.second);
         char tmp[255];
-        sprintf(tmp, "mse(%.10f),rmse(%.9f).txt", mse.first, mse.second);
+        sprintf(tmp, "mse(%.10f),rmse(%.9f)", mse.first, mse.second);
         writeText(path, tmp, std::vector<Float>(), Point2i(), 0);
     }
 
