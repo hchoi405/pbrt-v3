@@ -452,6 +452,11 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         Float fVariance =
                             (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
                         globalVariance[pixelIndex] = fVariance;
+
+                        if (batch != BATCH_NUM) {
+                            pEff.updateStats(radianceValues.size(), fMean,
+                                             fVariance, localTime);
+                        }
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
