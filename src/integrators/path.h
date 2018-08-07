@@ -55,6 +55,8 @@ class PathIntegrator : public SamplerIntegrator {
                    const std::string &lightSampleStrategy = "spatial");
 
     void Preprocess(const Scene &scene, Sampler &sampler);
+    Spectrum Li2(const RayDifferential &ray, const Scene &scene,
+                Sampler &sampler, MemoryArena &arena, int depth) const;
     Spectrum Li(const RayDifferential &ray, const Scene &scene,
                 Sampler &sampler, MemoryArena &arena, int depth) const;
 

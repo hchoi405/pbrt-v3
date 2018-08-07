@@ -90,6 +90,9 @@ class SamplerIntegrator : public Integrator {
     virtual Spectrum Li(const RayDifferential &ray, const Scene &scene,
                         Sampler &sampler, MemoryArena &arena,
                         int depth = 0) const = 0;
+    virtual Spectrum Li2(const RayDifferential &ray, const Scene &scene,
+                        Sampler &sampler, MemoryArena &arena,
+                        int depth = 0) const { return 0.f; };
     Spectrum SpecularReflect(const RayDifferential &ray,
                              const SurfaceInteraction &isect,
                              const Scene &scene, Sampler &sampler,
