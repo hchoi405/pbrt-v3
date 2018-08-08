@@ -24,33 +24,36 @@ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
 */
-/* single nearest neighbor search written by Tamas Nepusz <tamas@cs.rhul.ac.uk> */
+/* single nearest neighbor search written by Tamas Nepusz <tamas@cs.rhul.ac.uk>
+ */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 //#include <pthread.h>
 #include "kdtree.h"
 
-#define SQ(x)           ((x) * (x))
+#define SQ(x) ((x) * (x))
 
-static void clear_rec(struct kdnode *node, void (*destr)(void*));
-static int insert_rec(struct kdnode **node, const double *pos, void *data, int dir, int dim);
-static int rlist_insert(struct res_node *list, struct kdnode *item, double dist_sq);
+static void clear_rec(struct kdnode *node, void (*destr)(void *));
+static int insert_rec(struct kdnode **node, const double *pos, void *data,
+                      int dir, int dim);
+static int rlist_insert(struct res_node *list, struct kdnode *item,
+                        double dist_sq);
 static void clear_results(struct kdres *set);
 
-static struct kdhyperrect* hyperrect_create(int dim, const double *min, const double *max);
+static struct kdhyperrect *hyperrect_create(int dim, const double *min,
+                                            const double *max);
 static void hyperrect_free(struct kdhyperrect *rect);
-static struct kdhyperrect* hyperrect_duplicate(const struct kdhyperrect *rect);
+static struct kdhyperrect *hyperrect_duplicate(const struct kdhyperrect *rect);
 static void hyperrect_extend(struct kdhyperrect *rect, const double *pos);
 static double hyperrect_dist_sq(struct kdhyperrect *rect, const double *pos);
 
-struct kdtree *kd_create(int k)
-{
+struct kdtree *kd_create(int k) {
     struct kdtree *tree;
 
-    if(!(tree = new kdtree)) {
+    if (!(tree = new kdtree)) {
         return 0;
     }
 
@@ -62,30 +65,27 @@ struct kdtree *kd_create(int k)
     return tree;
 }
 
-void kd_free(struct kdtree *tree)
-{
-    if(tree) {
+void kd_free(struct kdtree *tree) {
+    if (tree) {
         kd_clear(tree);
         delete tree;
     }
 }
 
-static void clear_rec(struct kdnode *node, void (*destr)(void*))
-{
-    if(!node) return;
+static void clear_rec(struct kdnode *node, void (*destr)(void *)) {
+    if (!node) return;
 
     clear_rec(node->left, destr);
     clear_rec(node->right, destr);
-    
-    if(destr) {
+
+    if (destr) {
         destr(node->data);
     }
     delete[] node->pos;
     delete node;
 }
 
-void kd_clear(struct kdtree *tree)
-{
+void kd_clear(struct kdtree *tree) {
     clear_rec(tree->root, tree->destr);
     tree->root = 0;
 
@@ -95,22 +95,20 @@ void kd_clear(struct kdtree *tree)
     }
 }
 
-void kd_data_destructor(struct kdtree *tree, void (*destr)(void*))
-{
+void kd_data_destructor(struct kdtree *tree, void (*destr)(void *)) {
     tree->destr = destr;
 }
 
-
-static int insert_rec(struct kdnode **nptr, const double *pos, void *data, int dir, int dim)
-{
+static int insert_rec(struct kdnode **nptr, const double *pos, void *data,
+                      int dir, int dim) {
     int new_dir;
     struct kdnode *node;
 
-    if(!*nptr) {
-        if(!(node = new kdnode)) {
+    if (!*nptr) {
+        if (!(node = new kdnode)) {
             return -1;
         }
-        if(!(node->pos = new double[dim])) {
+        if (!(node->pos = new double[dim])) {
             delete[] node;
             return -1;
         }
@@ -124,14 +122,13 @@ static int insert_rec(struct kdnode **nptr, const double *pos, void *data, int d
 
     node = *nptr;
     new_dir = (node->dir + 1) % dim;
-    if(pos[node->dir] < node->pos[node->dir]) {
+    if (pos[node->dir] < node->pos[node->dir]) {
         return insert_rec(&(*nptr)->left, pos, data, new_dir, dim);
     }
     return insert_rec(&(*nptr)->right, pos, data, new_dir, dim);
 }
 
-int kd_insert(struct kdtree *tree, const double *pos, void *data)
-{
+int kd_insert(struct kdtree *tree, const double *pos, void *data) {
     if (insert_rec(&tree->root, pos, data, 0, tree->dim)) {
         return -1;
     }
@@ -145,19 +142,19 @@ int kd_insert(struct kdtree *tree, const double *pos, void *data)
     return 0;
 }
 
-static int find_nearest(struct kdnode *node, const double *pos, double range, struct res_node *list, int ordered, int dim)
-{
+static int find_nearest(struct kdnode *node, const double *pos, double range,
+                        struct res_node *list, int ordered, int dim) {
     double dist_sq, dx;
     int i, ret, added_res = 0;
 
-    if(!node) return 0;
+    if (!node) return 0;
 
     dist_sq = 0;
-    for(i=0; i<dim; i++) {
+    for (i = 0; i < dim; i++) {
         dist_sq += SQ(node->pos[i] - pos[i]);
     }
-    if(dist_sq <= SQ(range)) {
-        if(rlist_insert(list, node, ordered ? dist_sq : -1.0) == -1) {
+    if (dist_sq <= SQ(range)) {
+        if (rlist_insert(list, node, ordered ? dist_sq : -1.0) == -1) {
             return -1;
         }
         added_res = 1;
@@ -165,12 +162,14 @@ static int find_nearest(struct kdnode *node, const double *pos, double range, st
 
     dx = pos[node->dir] - node->pos[node->dir];
 
-    ret = find_nearest(dx <= 0.0 ? node->left : node->right, pos, range, list, ordered, dim);
-    if(ret >= 0 && fabs(dx) < range) {
+    ret = find_nearest(dx <= 0.0 ? node->left : node->right, pos, range, list,
+                       ordered, dim);
+    if (ret >= 0 && fabs(dx) < range) {
         added_res += ret;
-        ret = find_nearest(dx <= 0.0 ? node->right : node->left, pos, range, list, ordered, dim);
+        ret = find_nearest(dx <= 0.0 ? node->right : node->left, pos, range,
+                           list, ordered, dim);
     }
-    if(ret == -1) {
+    if (ret == -1) {
         return -1;
     }
     added_res += ret;
@@ -228,8 +227,9 @@ static int find_nearest_n(struct kdnode *node, const double *pos, double range, 
 }
 #endif
 
-static void kd_nearest_i(struct kdnode *node, const double *pos, struct kdnode **result, double *result_dist_sq, struct kdhyperrect* rect)
-{
+static void kd_nearest_i(struct kdnode *node, const double *pos,
+                         struct kdnode **result, double *result_dist_sq,
+                         struct kdhyperrect *rect) {
     int dir = node->dir;
     int i;
     double dummy, dist_sq;
@@ -263,7 +263,7 @@ static void kd_nearest_i(struct kdnode *node, const double *pos, struct kdnode *
     /* Check the distance of the point at the current node, compare it
      * with our best so far */
     dist_sq = 0;
-    for(i=0; i < rect->dim; i++) {
+    for (i = 0; i < rect->dim; i++) {
         dist_sq += SQ(node->pos[i] - pos[i]);
     }
     if (dist_sq < *result_dist_sq) {
@@ -287,8 +287,7 @@ static void kd_nearest_i(struct kdnode *node, const double *pos, struct kdnode *
     }
 }
 
-struct kdres *kd_nearest(struct kdtree *kd, const double *pos)
-{
+struct kdres *kd_nearest(struct kdtree *kd, const double *pos) {
     struct kdhyperrect *rect;
     struct kdnode *result;
     struct kdres *rset;
@@ -299,10 +298,10 @@ struct kdres *kd_nearest(struct kdtree *kd, const double *pos)
     if (!kd->rect) return 0;
 
     /* Allocate result set */
-    if(!(rset = new kdres)) {
+    if (!(rset = new kdres)) {
         return 0;
     }
-    if(!(rset->rlist = new res_node)) {
+    if (!(rset->rlist = new res_node)) {
         delete rset;
         return 0;
     }
@@ -318,8 +317,7 @@ struct kdres *kd_nearest(struct kdtree *kd, const double *pos)
     /* Our first guesstimate is the root node */
     result = kd->root;
     dist_sq = 0;
-    for (i = 0; i < kd->dim; i++)
-        dist_sq += SQ(result->pos[i] - pos[i]);
+    for (i = 0; i < kd->dim; i++) dist_sq += SQ(result->pos[i] - pos[i]);
 
     /* Search for the nearest neighbour recursively */
     kd_nearest_i(kd->root, pos, &result, &dist_sq, rect);
@@ -342,22 +340,23 @@ struct kdres *kd_nearest(struct kdtree *kd, const double *pos)
     }
 }
 
-struct kdres *kd_nearest_range(struct kdtree *kd, const double *pos, double range)
-{
+struct kdres *kd_nearest_range(struct kdtree *kd, const double *pos,
+                               double range) {
     int ret;
     struct kdres *rset;
 
-    if(!(rset = new kdres)) {
+    if (!(rset = new kdres)) {
         return 0;
     }
-    if(!(rset->rlist = new res_node)) {
+    if (!(rset->rlist = new res_node)) {
         delete rset;
         return 0;
     }
     rset->rlist->next = 0;
     rset->tree = kd;
 
-    if((ret = find_nearest(kd->root, pos, range, rset->rlist, 0, kd->dim)) == -1) {
+    if ((ret = find_nearest(kd->root, pos, range, rset->rlist, 0, kd->dim)) ==
+        -1) {
         kd_res_free(rset);
         return 0;
     }
@@ -366,38 +365,26 @@ struct kdres *kd_nearest_range(struct kdtree *kd, const double *pos, double rang
     return rset;
 }
 
-void kd_res_free(struct kdres *rset)
-{
+void kd_res_free(struct kdres *rset) {
     clear_results(rset);
     delete rset->rlist;
     delete rset;
 }
 
-int kd_res_size(struct kdres *set)
-{
-    return (set->size);
-}
+int kd_res_size(struct kdres *set) { return (set->size); }
 
-void kd_res_rewind(struct kdres *rset)
-{
-    rset->riter = rset->rlist->next;
-}
+void kd_res_rewind(struct kdres *rset) { rset->riter = rset->rlist->next; }
 
-int kd_res_end(struct kdres *rset)
-{
-    return rset->riter == 0;
-}
+int kd_res_end(struct kdres *rset) { return rset->riter == 0; }
 
-int kd_res_next(struct kdres *rset)
-{
+int kd_res_next(struct kdres *rset) {
     rset->riter = rset->riter->next;
     return rset->riter != 0;
 }
 
-void *kd_res_item(struct kdres *rset, double *pos)
-{
-    if(rset->riter) {
-        if(pos) {
+void *kd_res_item(struct kdres *rset, double *pos) {
+    if (rset->riter) {
+        if (pos) {
             memcpy(pos, rset->riter->item->pos, rset->tree->dim * sizeof *pos);
         }
         return rset->riter->item->data;
@@ -405,16 +392,13 @@ void *kd_res_item(struct kdres *rset, double *pos)
     return 0;
 }
 
-void *kd_res_item_data(struct kdres *set)
-{
-    return kd_res_item(set, 0);
-}
+void *kd_res_item_data(struct kdres *set) { return kd_res_item(set, 0); }
 
 /* ---- hyperrectangle helpers ---- */
-static struct kdhyperrect* hyperrect_create(int dim, const double *min, const double *max)
-{
+static struct kdhyperrect *hyperrect_create(int dim, const double *min,
+                                            const double *max) {
     size_t size = dim * sizeof(double);
-    struct kdhyperrect* rect = 0;
+    struct kdhyperrect *rect = 0;
 
     if (!(rect = new kdhyperrect)) {
         return 0;
@@ -436,23 +420,20 @@ static struct kdhyperrect* hyperrect_create(int dim, const double *min, const do
     return rect;
 }
 
-static void hyperrect_free(struct kdhyperrect *rect)
-{
+static void hyperrect_free(struct kdhyperrect *rect) {
     delete[] rect->min;
     delete[] rect->max;
     delete rect;
 }
 
-static struct kdhyperrect* hyperrect_duplicate(const struct kdhyperrect *rect)
-{
+static struct kdhyperrect *hyperrect_duplicate(const struct kdhyperrect *rect) {
     return hyperrect_create(rect->dim, rect->min, rect->max);
 }
 
-static void hyperrect_extend(struct kdhyperrect *rect, const double *pos)
-{
+static void hyperrect_extend(struct kdhyperrect *rect, const double *pos) {
     int i;
 
-    for (i=0; i < rect->dim; i++) {
+    for (i = 0; i < rect->dim; i++) {
         if (pos[i] < rect->min[i]) {
             rect->min[i] = pos[i];
         }
@@ -462,12 +443,11 @@ static void hyperrect_extend(struct kdhyperrect *rect, const double *pos)
     }
 }
 
-static double hyperrect_dist_sq(struct kdhyperrect *rect, const double *pos)
-{
+static double hyperrect_dist_sq(struct kdhyperrect *rect, const double *pos) {
     int i;
     double result = 0;
 
-    for (i=0; i < rect->dim; i++) {
+    for (i = 0; i < rect->dim; i++) {
         if (pos[i] < rect->min[i]) {
             result += SQ(rect->min[i] - pos[i]);
         } else if (pos[i] > rect->max[i]) {
@@ -480,18 +460,18 @@ static double hyperrect_dist_sq(struct kdhyperrect *rect, const double *pos)
 
 /* inserts the item. if dist_sq is >= 0, then do an ordered insert */
 /* TODO make the ordering code use heapsort */
-static int rlist_insert(struct res_node *list, struct kdnode *item, double dist_sq)
-{
+static int rlist_insert(struct res_node *list, struct kdnode *item,
+                        double dist_sq) {
     struct res_node *rnode;
 
-    if(!(rnode = new res_node)) { 
+    if (!(rnode = new res_node)) {
         return -1;
     }
     rnode->item = item;
     rnode->dist_sq = dist_sq;
 
-    if(dist_sq >= 0.0) {
-        while(list->next && list->next->dist_sq < dist_sq) {
+    if (dist_sq >= 0.0) {
+        while (list->next && list->next->dist_sq < dist_sq) {
             list = list->next;
         }
     }
@@ -500,11 +480,10 @@ static int rlist_insert(struct res_node *list, struct kdnode *item, double dist_
     return 0;
 }
 
-static void clear_results(struct kdres *rset)
-{
+static void clear_results(struct kdres *rset) {
     struct res_node *tmp, *node = rset->rlist->next;
 
-    while(node) {
+    while (node) {
         tmp = node;
         node = node->next;
         delete tmp;

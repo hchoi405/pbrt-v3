@@ -49,6 +49,13 @@
 
 namespace pbrt {
 
+struct PointInfo {
+    Point3f point;
+    Vector3f direction;
+    clock_t time;
+    Spectrum radiance;
+};
+
 // Integrator Declarations
 class Integrator {
   public:
@@ -85,14 +92,20 @@ class SamplerIntegrator : public Integrator {
     void Render(const Scene &scene);
     std::vector<Spectrum> processPixel(Point2i pixel,
                                        uint32_t &remainingSampleNum,
-                      const Scene &scene, std::shared_ptr<Sampler> &tileSampler,
-                      MemoryArena &arena, std::unique_ptr<FilmTile> &filmTile); 
+                                       const Scene &scene,
+                                       std::shared_ptr<Sampler> &tileSampler,
+                                       MemoryArena &arena,
+                                       std::unique_ptr<FilmTile> &filmTile,
+                                       std::vector<PointInfo> &pointInfoList);
     virtual Spectrum Li(const RayDifferential &ray, const Scene &scene,
                         Sampler &sampler, MemoryArena &arena,
                         int depth = 0) const = 0;
     virtual Spectrum Li2(const RayDifferential &ray, const Scene &scene,
-                        Sampler &sampler, MemoryArena &arena,
-                        int depth = 0) const { return 0.f; };
+                         Sampler &sampler, MemoryArena &arena,
+                         std::vector<PointInfo> &pointInfoList,
+                         int depth = 0) const {
+        return 0.f;
+    };
     Spectrum SpecularReflect(const RayDifferential &ray,
                              const SurfaceInteraction &isect,
                              const Scene &scene, Sampler &sampler,

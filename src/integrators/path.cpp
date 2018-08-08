@@ -36,11 +36,13 @@
 #include "film.h"
 #include "integrators/path.h"
 #include "interaction.h"
+#include "kdtree.h"
 #include "paramset.h"
 #include "scene.h"
 #include "stats.h"
 
 namespace pbrt {
+extern kdtree *kd;
 
 STAT_PERCENT("Integrator/Zero-radiance paths", zeroRadiancePaths, totalPaths);
 STAT_INT_DISTRIBUTION("Integrator/Path length", pathLength);
@@ -62,8 +64,9 @@ void PathIntegrator::Preprocess(const Scene &scene, Sampler &sampler) {
 }
 
 Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
-                            Sampler &sampler, MemoryArena &arena,
-                            int depth) const {
+                             Sampler &sampler, MemoryArena &arena,
+                             std::vector<PointInfo> &pointInfoList,
+                             int depth) const {
     ProfilePhase p(Prof::SamplerIntegratorLi);
     Spectrum L(0.f), beta(1.f);
     RayDifferential ray(r);
@@ -82,6 +85,12 @@ Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
         // Find next path vertex and accumulate contribution
         VLOG(2) << "Path tracer bounce " << bounces << ", current L = " << L
                 << ", beta = " << beta;
+
+        clock_t localStart, localTime;
+
+        if (bounces != 0) {
+            localStart = clock();
+        }
 
         // Intersect _ray_ with scene and store intersection in _isect_
         SurfaceInteraction isect;
@@ -125,6 +134,27 @@ Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
             if (Ld.IsBlack()) ++zeroRadiancePaths;
             CHECK_GE(Ld.y(), 0.f);
             L += Ld;
+        }
+
+        if (bounces != 0) {
+            localTime = localStart - clock();
+
+            PointInfo pInfo;
+            pInfo.point = ray.o;
+            pInfo.direction = ray.d;
+            pInfo.time = localTime;
+            pInfo.radiance = L;
+
+			pointInfoList.push_back(pInfo);
+
+            /*double test[] = {0, 0, 0};
+            std::unique_ptr<kdres> res(kd_nearest_range(kd, test, 0.0));
+            if (res->size) {
+                auto data = (Float *)res->riter->item->data;
+                printf("found, data: %f\n", *data);
+            } else {
+                printf("not found: %d\n", res->size);
+            }*/
         }
 
         // Sample BSDF to get new path direction

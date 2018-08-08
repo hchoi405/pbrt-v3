@@ -38,10 +38,10 @@
 #include <numeric>
 #include "camera.h"
 #include "film.h"
-#include "hj.h"
 #include "imageio.h"
 #include "integrator.h"
 #include "interaction.h"
+#include "kdtree.h"
 #include "parallel.h"
 #include "paramset.h"
 #include "progressreporter.h"
@@ -50,6 +50,8 @@
 #include "sampling.h"
 #include "scene.h"
 #include "stats.h"
+
+#include <Windows.h>
 
 namespace pbrt {
 
@@ -236,10 +238,263 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 }
 
 #ifdef ADAPTIVE_SAMPLING
+
+enum class ASMethod { Rvariance, Efficiency };
+
+struct PixelEfficiency {
+    pbrt::Point2i pixel;
+    std::shared_ptr<pbrt::Sampler> sampler;
+    uint32_t n;
+    pbrt::Float mean;
+    pbrt::Float variance;
+    pbrt::Float time;
+    pbrt::Float efficiency;
+
+    PixelEfficiency(pbrt::Point2i _pixel,
+                    std::shared_ptr<pbrt::Sampler> _sampler)
+        : pixel(_pixel),
+          sampler(_sampler),
+          n(0),
+          mean(pbrt::Float(0)),
+          variance(pbrt::Float(0)),
+          time(pbrt::Float(0)),
+          efficiency(pbrt::Float(0)) {}
+
+    void updateStats(uint32_t m, pbrt::Float mMean, pbrt::Float mVariance,
+                     pbrt::Float mTime) {
+        pbrt::Float mn = n + m;
+        pbrt::Float mnMean = (n * mean + m * mMean) / mn;
+        pbrt::Float mnVariance =
+            (n * (variance + mean * mean) + m * (mVariance + mMean * mMean)) /
+                mn -
+            mnMean * mnMean;
+        pbrt::Float mnTime = (n * time + m * mTime) / mn;
+
+        this->n = mn;
+        this->mean = mnMean;
+        this->variance = mnVariance;
+        this->time = mnTime;
+    }
+
+    void updateEfficiency(ASMethod method) {
+        pbrt::Float relativeVariance = variance / pow(mean + 0.0001, 2.0);
+
+        // different metrics
+        switch (method) {
+        case ASMethod::Rvariance:
+            efficiency = relativeVariance;
+            break;
+        case ASMethod::Efficiency:
+            efficiency = relativeVariance / std::max(this->time, 1.0);
+            break;
+        }
+    }
+};
+
+struct ExecutionResult {
+    pbrt::Float time;
+};
+
+struct ExecutionParams {
+    int spp;
+    ASMethod method;
+    pbrt::Float clampThreshold;
+    int maxSppRatio;
+    int batch;
+    ExecutionResult result;
+
+    std::string getDirectoryName() const {
+        char tmp[255];
+        std::string methodName;
+        switch (method) {
+        case ASMethod::Rvariance:
+            methodName = std::string("rvar");
+            break;
+        case ASMethod::Efficiency:
+            methodName = std::string("eff");
+            break;
+        }
+        sprintf(tmp, "spp%d_%s_clamp%.4f_max%d", spp, methodName.c_str(),
+                clampThreshold, maxSppRatio);
+        return std::string(tmp);
+    }
+};
+
+class Executor {
+    std::vector<ExecutionParams> _params;
+    std::vector<ExecutionResult> _results;
+
+  public:
+    Executor() { createFolder("results\\"); }
+    size_t getNum() const { return _params.size(); }
+
+    ExecutionParams getParams(int i) { return _params[i]; }
+
+    void addParams(ExecutionParams params) { _params.push_back(params); }
+
+    void addResult(ExecutionResult result) { _results.push_back(result); }
+
+    static void createFolder(std::string path) {
+        if (CreateDirectory(path.c_str(), NULL) ||
+            ERROR_ALREADY_EXISTS == GetLastError()) {
+        } else {
+            std::cout << "failed to create directory: " << path << std::endl;
+        }
+    }
+};
+
+template <typename T>
+T getVariance(std::vector<T> &arr, T mean) {
+    return std::accumulate(arr.begin(), arr.end(), T(0.f),
+                           [&mean](const T &a, const T &b) {
+                               // std::cout << a << ", " << b << std::endl;
+                               return a + (b - mean) * (b - mean);
+                           }) /
+           arr.size();
+}
+
+template <typename T>
+void writeImage(std::string path, std::string filename, std::vector<T> &values,
+                pbrt::Point2i res, const int OFFSET) {
+    writeImage(path.c_str(), filename.c_str(), values, res, OFFSET);
+}
+template <typename T>
+void writeImage(const char path[], const char filename[],
+                std::vector<T> &values, pbrt::Point2i res, const int OFFSET) {
+    std::unique_ptr<pbrt::Float[]> rgb(new pbrt::Float[3 * res.x * res.y]);
+
+    auto minmax = std::minmax_element(values.begin(), values.end());
+    pbrt::Float maxValue = *minmax.second;
+    pbrt::Float minValue = *minmax.first;
+    for (int i = 0; i < res.y; ++i) {
+        for (int j = 0; j < res.x; ++j) {
+            int ind = i * res.x + j;
+            rgb[3 * ind + 0] = pbrt::Float(values[OFFSET + ind]);
+            rgb[3 * ind + 1] = pbrt::Float(values[OFFSET + ind]);
+            rgb[3 * ind + 2] = pbrt::Float(values[OFFSET + ind]);
+        }
+    }
+
+    char newfilename[255];
+    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path, filename, minValue,
+            maxValue);
+    pbrt::WriteImage(
+        newfilename, &rgb[0],
+        pbrt::Bounds2i(pbrt::Point2i(0, 0), pbrt::Point2i(res.x, res.y)),
+        pbrt::Point2i(res.x, res.y));
+}
+
+template <typename T>
+void writeText(std::string path, std::string filename, std::vector<T> &values,
+               pbrt::Point2i res, const int OFFSET) {
+    writeText(path.c_str(), filename.c_str(), values, res, OFFSET);
+}
+
+template <typename T>
+void writeText(const char path[], const char filename[], std::vector<T> &values,
+               pbrt::Point2i res, const int OFFSET) {
+    char newfilename[255];
+
+    auto minmax = std::minmax_element(values.begin(), values.end());
+    pbrt::Float maxValue = *minmax.second;
+    pbrt::Float minValue = *minmax.first;
+
+    sprintf(newfilename, "%sstat_%s.txt", path, filename);
+    std::ofstream out(newfilename);
+    char tmp[255];
+    for (int i = OFFSET; i < values.size(); ++i) {
+        sprintf(tmp, "%f\n", pbrt::Float(values[i]));
+        out << tmp;
+    }
+    out.close();
+}
+
+std::pair<pbrt::Float, pbrt::Float> diff2(std::string gtPath, std::string in) {
+    std::pair<pbrt::Float, pbrt::Float> result;
+
+    float tol = 0.;
+    const char *outfile = nullptr;
+
+    const char *filename[2] = {gtPath.c_str(), in.c_str()};
+    pbrt::Point2i res[2];
+    std::unique_ptr<pbrt::RGBSpectrum[]> imgs[2] = {
+        pbrt::ReadImage(filename[0], &res[0]),
+        pbrt::ReadImage(filename[1], &res[1])};
+    if (!imgs[0]) {
+        fprintf(stderr, "%s: unable to read image\n", filename[0]);
+        return result;
+    }
+    if (!imgs[1]) {
+        fprintf(stderr, "%s: unable to read image\n", filename[1]);
+        return result;
+    }
+    if (res[0] != res[1]) {
+        fprintf(stderr,
+                "imgtool: image resolutions don't match \"%s\": (%d, %d) "
+                "\"%s\": (%d, %d)\n",
+                filename[0], res[0].x, res[0].y, filename[1], res[1].x,
+                res[1].y);
+        return result;
+    }
+
+    double sum[2] = {0., 0.};
+    int smallDiff = 0, bigDiff = 0;
+    double rmse = 0.0;
+    double mse = 0.0;
+    for (int i = 0; i < res[0].x * res[0].y; ++i) {
+        pbrt::Float rgb[2][3];
+        imgs[0][i].ToRGB(rgb[0]);
+        imgs[1][i].ToRGB(rgb[1]);
+
+        pbrt::Float diffRGB[3];
+        for (int c = 0; c < 3; ++c) {
+            pbrt::Float c0 = rgb[0][c], c1 = rgb[1][c];
+            diffRGB[c] = std::abs(c0 - c1);
+
+            if (c0 == 0 && c1 == 0) continue;
+
+            sum[0] += c0;
+            sum[1] += c1;
+
+            float d = std::abs(c0 - c1) / c0;
+            mse += (c0 - c1) * (c0 - c1);
+            rmse += (c0 - c1) * (c0 - c1) / pow(c0 + 0.0001, 2.0);
+            if (d > .005) ++smallDiff;
+            if (d > .05) ++bigDiff;
+        }
+    }
+
+    double avg[2] = {sum[0] / (3. * res[0].x * res[0].y),
+                     sum[1] / (3. * res[0].x * res[0].y)};
+    double avgDelta = (avg[0] - avg[1]) / std::min(avg[0], avg[1]);
+    if ((tol == 0. && (bigDiff > 0 || smallDiff > 0)) ||
+        (tol > 0. && 100.f * std::abs(avgDelta) > tol)) {
+        result.first = mse / (3. * res[0].x * res[0].y);
+        result.second = rmse / (3. * res[0].x * res[0].y);
+        return result;
+    }
+
+    return result;
+}
+
+template <typename T>
+std::vector<size_t> orderedIndice(std::vector<T> const &values) {
+    std::vector<size_t> indices(values.size());
+    std::iota(begin(indices), end(indices), static_cast<size_t>(0));
+
+    std::sort(begin(indices), end(indices),
+              [&](size_t a, size_t b) { return values[a] > values[b]; });
+    return indices;
+}
+
+kdtree *kd = kd_create(3);
+
 std::vector<Spectrum> SamplerIntegrator::processPixel(
     Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
-    std::unique_ptr<FilmTile> &filmTile) {
+    std::unique_ptr<FilmTile> &filmTile,
+    std::vector<PointInfo> &pointInfoList) {
+    // vector for radiance values
     std::vector<Spectrum> radianceValues(remainingSampleNum);
 
     for (uint32_t &sampleIndex = remainingSampleNum; sampleIndex > 0;
@@ -256,7 +511,8 @@ std::vector<Spectrum> SamplerIntegrator::processPixel(
 
         // Evaluate radiance along camera ray
         Spectrum L(0.f);
-        if (rayWeight > 0) L = Li(ray, scene, *tileSampler, arena);
+        if (rayWeight > 0)
+            L = Li2(ray, scene, *tileSampler, arena, pointInfoList);
 
         // Issue warning if unexpected radiance value
         // returned
@@ -311,6 +567,10 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Preprocess(scene, *sampler);
     std::ios::sync_with_stdio(false);
 
+    Float pos[] = {0, 0, 0};
+    Float data = 405;
+    kd_insert(kd, pos, &data);
+
     // Compute number of tiles, _nTiles_, to use for parallel rendering
     Bounds2i sampleBounds = camera->film->GetSampleBounds();
     Vector2i sampleExtent = sampleBounds.Diagonal();
@@ -325,25 +585,24 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
     Executor exec;
 
+    int rvarSpp = 128;
+    int effSpp = 154;
     // dummy params to remove cold cache
-    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
+    exec.addParams({rvarSpp, ASMethod::Rvariance, 1.0, 0, 2});
 
-    exec.addParams({154, ASMethod::Efficiency, 1.0, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
-
-	exec.addParams({154, ASMethod::Efficiency, 0.9999, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.9999, 0, 2});
-
-	exec.addParams({154, ASMethod::Efficiency, 0.999, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.999, 0, 2});
-
-    exec.addParams({154, ASMethod::Efficiency, 0.99, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.99, 0, 2});
+    // exec.addParams({rvarSpp, ASMethod::Rvariance, 1.0, 0, 2});
+    // exec.addParams({effSpp, ASMethod::Efficiency, 1.0, 0, 2});
+    // exec.addParams({rvarSpp, ASMethod::Rvariance, 0.9999, 0, 2});
+    // exec.addParams({effSpp, ASMethod::Efficiency, 0.9999, 0, 2});
+    // exec.addParams({rvarSpp, ASMethod::Rvariance, 0.999, 0, 2});
+    // exec.addParams({effSpp, ASMethod::Efficiency, 0.999, 0, 2});
+    // exec.addParams({rvarSpp, ASMethod::Rvariance, 0.99, 0, 2});
+    // exec.addParams({effSpp, ASMethod::Efficiency, 0.99, 0, 2});
 
     for (int exe = 0; exe < exec.getNum(); ++exe) {
         ExecutionParams params = exec.getParams(exe);
         std::string path = "results\\" + params.getDirectoryName() + "\\";
-        createDirectory(path);
+        Executor::createFolder(path);
 
         int SPP = params.spp;
         camera->film->filename = path + params.getDirectoryName() + ".exr";
@@ -396,9 +655,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
         std::vector<Float> globalVariance(imageX * imageY, 0);
 
-        clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
-                overheadStart;
+        clock_t globalTime = 0, globalStart = clock();
+        clock_t overheadTime = 0, overheadStart = clock();
+
         std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
+        std::vector<std::vector<PointInfo>> pointInfoList(
+            MaxThreadIndex());
         {
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
             for (int batch = 1; batch <= BATCH_NUM; ++batch) {
@@ -436,9 +698,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         }
 
                         clock_t localTime, localStart = clock();
+
+                        // ray tracing and shading
                         auto radianceValues = processPixel(
                             pixel, remainingSamples[pixelIndex], scene,
-                            tileSampler, arena, filmTileArray[pixelIndex]);
+                            tileSampler, arena, filmTileArray[pixelIndex],
+                            pointInfoList[ThreadIndex]);
+
                         localTime = std::clock() - localStart;
 
                         // mean and variance of this batch
@@ -446,7 +712,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                                          radianceValues.end(),
                                                          Spectrum(0.f)) /
                                          radianceValues.size();
-                        Spectrum sVariance = getVariance(radianceValues, sMean);
+                        Spectrum sVariance =
+                            getVariance(radianceValues, sMean);
 
                         Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
                         Float fVariance =
@@ -460,8 +727,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
-
-                overheadStart = clock();
 
                 // do not sort at last iteration
                 if (batch == BATCH_NUM) {
@@ -489,7 +754,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 // sort by efficiency
                 std::sort(
                     efficiencyList.begin(), efficiencyList.end(),
-                    [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
+                          [](const PixelEfficiency &lhs,
+                             const PixelEfficiency &rhs) {
                         return lhs.efficiency > rhs.efficiency;
                     });
 
