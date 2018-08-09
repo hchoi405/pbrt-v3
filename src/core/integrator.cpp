@@ -1,4 +1,5 @@
 #define ADAPTIVE_SAMPLING
+//#define IMAGE_SPACE
 
 /*
     pbrt source code is Copyright(c) 1998-2016
@@ -41,7 +42,6 @@
 #include "imageio.h"
 #include "integrator.h"
 #include "interaction.h"
-#include "kdtree.h"
 #include "parallel.h"
 #include "paramset.h"
 #include "progressreporter.h"
@@ -51,10 +51,13 @@
 #include "scene.h"
 #include "stats.h"
 
+#include "nanoflann.hpp"
+#include "utils.h"
+
 #include <Windows.h>
 
 namespace pbrt {
-
+extern int counter;
 STAT_COUNTER("Integrator/Camera rays traced", nCameraRays);
 
 // Integrator Method Definitions
@@ -301,6 +304,7 @@ struct ExecutionParams {
     pbrt::Float clampThreshold;
     int maxSppRatio;
     int batch;
+
     ExecutionResult result;
 
     std::string getDirectoryName() const {
@@ -364,16 +368,19 @@ void writeImage(const char path[], const char filename[],
     std::unique_ptr<pbrt::Float[]> rgb(new pbrt::Float[3 * res.x * res.y]);
 
     auto minmax = std::minmax_element(values.begin(), values.end());
-    pbrt::Float maxValue = *minmax.second;
-    pbrt::Float minValue = *minmax.first;
-    for (int i = 0; i < res.y; ++i) {
-        for (int j = 0; j < res.x; ++j) {
-            int ind = i * res.x + j;
-            rgb[3 * ind + 0] = pbrt::Float(values[OFFSET + ind]);
-            rgb[3 * ind + 1] = pbrt::Float(values[OFFSET + ind]);
-            rgb[3 * ind + 2] = pbrt::Float(values[OFFSET + ind]);
+    pbrt::Float maxValue =
+        (minmax.second != values.end()) ? *minmax.second : 0.0;
+    pbrt::Float minValue = (minmax.first != values.end()) ? *minmax.first : 0.0;
+
+    if (values.size() == res.y * res.x)
+        for (int i = 0; i < res.y; ++i) {
+            for (int j = 0; j < res.x; ++j) {
+                int ind = i * res.x + j;
+                rgb[3 * ind + 0] = pbrt::Float(values[OFFSET + ind]);
+                rgb[3 * ind + 1] = pbrt::Float(values[OFFSET + ind]);
+                rgb[3 * ind + 2] = pbrt::Float(values[OFFSET + ind]);
+            }
         }
-    }
 
     char newfilename[255];
     sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path, filename, minValue,
@@ -395,9 +402,11 @@ void writeText(const char path[], const char filename[], std::vector<T> &values,
                pbrt::Point2i res, const int OFFSET) {
     char newfilename[255];
 
-    auto minmax = std::minmax_element(values.begin(), values.end());
-    pbrt::Float maxValue = *minmax.second;
-    pbrt::Float minValue = *minmax.first;
+    if (!values.empty()) {
+        auto minmax = std::minmax_element(values.begin(), values.end());
+        pbrt::Float maxValue = *minmax.second;
+        pbrt::Float minValue = *minmax.first;
+    }
 
     sprintf(newfilename, "%sstat_%s.txt", path, filename);
     std::ofstream out(newfilename);
@@ -487,13 +496,18 @@ std::vector<size_t> orderedIndice(std::vector<T> const &values) {
     return indices;
 }
 
-kdtree *kd = kd_create(3);
+typedef nanoflann::KDTreeSingleIndexAdaptor<
+    nanoflann::L2_Simple_Adaptor<Float, PointCloud<Float>>, PointCloud<Float>,
+    3 /* dim */
+    >
+    my_kd_tree_t;
+std::unique_ptr<my_kd_tree_t> kdtree;
 
 std::vector<Spectrum> SamplerIntegrator::processPixel(
     Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
-    std::unique_ptr<FilmTile> &filmTile,
-    std::vector<PointInfo> &pointInfoList) {
+    std::unique_ptr<FilmTile> &filmTile, std::vector<PointInfo> &pointInfoList,
+    int batch) {
     // vector for radiance values
     std::vector<Spectrum> radianceValues(remainingSampleNum);
 
@@ -509,10 +523,11 @@ std::vector<Spectrum> SamplerIntegrator::processPixel(
                                std::sqrt((Float)tileSampler->samplesPerPixel));
         ++nCameraRays;
 
+        // std::cout << "batch: " << batch << std::endl;
         // Evaluate radiance along camera ray
         Spectrum L(0.f);
         if (rayWeight > 0)
-            L = Li2(ray, scene, *tileSampler, arena, pointInfoList);
+            L = Li2(ray, scene, *tileSampler, arena, pointInfoList, batch);
 
         // Issue warning if unexpected radiance value
         // returned
@@ -567,10 +582,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Preprocess(scene, *sampler);
     std::ios::sync_with_stdio(false);
 
-    Float pos[] = {0, 0, 0};
-    Float data = 405;
-    kd_insert(kd, pos, &data);
-
     // Compute number of tiles, _nTiles_, to use for parallel rendering
     Bounds2i sampleBounds = camera->film->GetSampleBounds();
     Vector2i sampleExtent = sampleBounds.Diagonal();
@@ -610,13 +621,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
         // Film should be clear before processing on new params
         camera->film->Clear();
 
-        const int BATCH_SIZE = SPP / params.batch;
-        if (SPP % BATCH_SIZE != 0) {
-            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)",
-                   sampler->samplesPerPixel, BATCH_SIZE);
+        if (SPP % params.batch != 0) {
+            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)", SPP,
+                   params.batch);
             exit(1);
         }
-        const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
+        const int BATCH_SIZE = SPP / params.batch;
 
         // to exclude cold cache latency, remove some rows
         const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * imageY;
@@ -656,14 +666,16 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<Float> globalVariance(imageX * imageY, 0);
 
         clock_t globalTime = 0, globalStart = clock();
-        clock_t overheadTime = 0, overheadStart = clock();
+        clock_t overheadTime = 0;
 
         std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
-        std::vector<std::vector<PointInfo>> pointInfoList(
-            MaxThreadIndex());
+        std::vector<std::vector<PointInfo>> pointInfoList(MaxThreadIndex());
+        PointCloud<Float> cloud;
         {
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
-            for (int batch = 1; batch <= BATCH_NUM; ++batch) {
+            for (int batch = 1; batch <= params.batch; ++batch) {
+                printf("--------------- [Batch%d] ---------------\n", batch);
+
                 ParallelFor(
                     [&](int64_t iter) {
                         auto &pEff = efficiencyList[iter];
@@ -703,7 +715,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         auto radianceValues = processPixel(
                             pixel, remainingSamples[pixelIndex], scene,
                             tileSampler, arena, filmTileArray[pixelIndex],
-                            pointInfoList[ThreadIndex]);
+                            pointInfoList[ThreadIndex], batch);
 
                         localTime = std::clock() - localStart;
 
@@ -712,100 +724,109 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                                          radianceValues.end(),
                                                          Spectrum(0.f)) /
                                          radianceValues.size();
-                        Spectrum sVariance =
-                            getVariance(radianceValues, sMean);
+                        Spectrum sVariance = getVariance(radianceValues, sMean);
 
                         Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
                         Float fVariance =
                             (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
                         globalVariance[pixelIndex] = fVariance;
 
-                        if (batch != BATCH_NUM) {
+                        if (batch != params.batch) {
                             pEff.updateStats(radianceValues.size(), fMean,
                                              fVariance, localTime);
                         }
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
-
+                std::cout << "zero counter: " << counter << std::endl;
                 // do not sort at last iteration
-                if (batch == BATCH_NUM) {
-                    break;
-                }
+                if (batch != params.batch) {
+                    printf("Start Adaptive Sampling\n");
+                    clock_t overheadStart = clock();
 
-                printf("[Batch%d]\n", batch);
+#ifdef IMAGE_SPACE
+                    // get variance threshold
+                    auto indice = orderedIndice(globalVariance);
+                    int clampingNum = std::floor(efficiencyList.size() *
+                                                 (1 - params.clampThreshold));
+                    Float threshold = globalVariance[indice[clampingNum]];
 
-                // sort variance
-                auto indice = orderedIndice(globalVariance);
+                    // Update efficiency
+                    std::for_each(efficiencyList.begin(), efficiencyList.end(),
+                                  [&threshold, &params](PixelEfficiency &pEff) {
+                                      if (pEff.variance > threshold)
+                                          pEff.variance = threshold;
+                                      pEff.updateEfficiency(params.method);
+                                  });
 
-                // clamp variance
-                int clampingNum = std::floor(efficiencyList.size() *
-                                             (1 - params.clampThreshold));
-                Float threshold = globalVariance[indice[clampingNum]];
-
-                // Update efficiency
-                std::for_each(efficiencyList.begin(), efficiencyList.end(),
-                              [&threshold, &params](PixelEfficiency &pEff) {
-                                  if (pEff.variance > threshold)
-                                      pEff.variance = threshold;
-                                  pEff.updateEfficiency(params.method);
+                    // sort by efficiency
+                    std::sort(efficiencyList.begin(), efficiencyList.end(),
+                              [](const PixelEfficiency &lhs,
+                                 const PixelEfficiency &rhs) {
+                                  return lhs.efficiency > rhs.efficiency;
                               });
+#else
 
-                // sort by efficiency
-                std::sort(
-                    efficiencyList.begin(), efficiencyList.end(),
-                          [](const PixelEfficiency &lhs,
-                             const PixelEfficiency &rhs) {
-                        return lhs.efficiency > rhs.efficiency;
-                    });
-
-                Float effSum = std::accumulate(
-                    efficiencyList.begin(), efficiencyList.end(), 0.0,
-                    [](const Float &a, const PixelEfficiency &b) {
-                        return a + b.efficiency;
-                    });
-
-                std::cout << "most efficient pixel: " << efficiencyList[0].pixel
-                          << std::endl;
-                printf("efficiency max(%f), sum(%f)\n",
-                       efficiencyList[0].efficiency, effSum);
-                printf("mean[%f], variance[%f]\n", efficiencyList[0].mean,
-                       efficiencyList[0].variance);
-
-                uint32_t sampleCounter = 0;
-                for (size_t i = 0; i < efficiencyList.size(); ++i) {
-                    auto &pEff = efficiencyList[i];
-                    int ind = pEff.pixel.y * imageX + pEff.pixel.x;
-                    Float ratio = pEff.efficiency / effSum;
-                    pEff.sampler->SetSampleNumber(0);
-                    int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
-
-                    // spp clamping
-                    if (params.maxSppRatio > 0 &&
-                        candidate > params.spp * params.maxSppRatio) {
-                        candidate = params.spp * params.maxSppRatio;
+                    for (int i = 0; i < MaxThreadIndex(); ++i) {
+                        for (auto pointInfo : pointInfoList[i]) {
+                            auto &p = pointInfo.point;
+                            cloud.pts.push_back({p.x, p.y, p.z});
+                        }
                     }
 
-                    remainingSamples[ind] = candidate;
-                    sampleCounter += candidate;
+					kdtree = std::unique_ptr<my_kd_tree_t>(new my_kd_tree_t(
+                        3, cloud,
+                        nanoflann::KDTreeSingleIndexAdaptorParams(10)));
+                    kdtree->buildIndex();
 
-                    totalSampleNum[ind] += candidate;
+                    std::for_each(efficiencyList.begin(), efficiencyList.end(),
+                                  [&params](PixelEfficiency &pEff) {
+                                      pEff.efficiency = 1;
+                                  });
+
+#endif
+                    Float effSum = std::accumulate(
+                        efficiencyList.begin(), efficiencyList.end(), 0.0,
+                        [](const Float &a, const PixelEfficiency &b) {
+                            return a + b.efficiency;
+                        });
+
+                    uint32_t sampleCounter = 0;
+                    for (size_t i = 0; i < efficiencyList.size(); ++i) {
+                        auto &pEff = efficiencyList[i];
+                        int ind = pEff.pixel.y * imageX + pEff.pixel.x;
+                        Float ratio = pEff.efficiency / effSum;
+                        pEff.sampler->SetSampleNumber(0);
+                        int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
+
+                        // spp clamping
+                        if (params.maxSppRatio > 0 &&
+                            candidate > params.spp * params.maxSppRatio) {
+                            candidate = params.spp * params.maxSppRatio;
+                        }
+
+                        remainingSamples[ind] = candidate;
+                        sampleCounter += candidate;
+
+                        totalSampleNum[ind] += candidate;
+                    }
+
+                    uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
+                    printf(
+                        "samples_per_batch(%d), sampleCounter(%ld), "
+                        "leftovers(%d)\n",
+                        SAMPLES_PER_BATCH, sampleCounter, leftovers);
+
+                    int ind = 0;
+                    for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
+                        if (ind >= efficiencyList.size()) ind = 0;
+                        remainingSamples[efficiencyList[ind].pixel.y * imageX +
+                                         efficiencyList[ind].pixel.x]++;
+                    }
+
+                    overheadTime += clock() - overheadStart;
                 }
-
-                uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
-                printf(
-                    "samples_per_batch(%d), sampleCounter(%ld), "
-                    "leftovers(%d)\n",
-                    SAMPLES_PER_BATCH, sampleCounter, leftovers);
-
-                int ind = 0;
-                for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
-                    if (ind >= efficiencyList.size()) ind = 0;
-                    remainingSamples[efficiencyList[ind].pixel.y * imageX +
-                                     efficiencyList[ind].pixel.x]++;
-                }
-
-                overheadTime += clock() - overheadStart;
+                printf("\n\n");
             }
             // reporter.Done();
         }
@@ -813,7 +834,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         globalTime = std::clock() - globalStart;
 
         // [Stats] ==================================================
-        printf("\n------------[Statistics]------------\n");
+        printf("\n------------- [Statistics] -------------\n");
         printf("Time: %fs\n", globalTime / Float(CLOCKS_PER_SEC));
         printf("Time for overhead: %fs\n",
                overheadTime / Float(CLOCKS_PER_SEC));
@@ -876,7 +897,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
         writeText(path, tmp, std::vector<Float>(), Point2i(), 0);
     }
 
-    std::cout << "Rendering finished" << std::endl;
+    printf("----------------------------------------\n\n");
+    std::cout << "Rendering finished\n\n" << std::endl;
     LOG(INFO) << "Rendering finished";
 }
 #else

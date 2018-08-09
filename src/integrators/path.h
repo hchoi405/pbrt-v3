@@ -57,7 +57,7 @@ class PathIntegrator : public SamplerIntegrator {
     void Preprocess(const Scene &scene, Sampler &sampler);
     Spectrum Li2(const RayDifferential &ray, const Scene &scene,
                  Sampler &sampler, MemoryArena &arena,
-                 std::vector<PointInfo> &pointInfoList, int depth) const;
+                 std::vector<PointInfo> &pointInfoList, int batch, int depth) const;
     Spectrum Li(const RayDifferential &ray, const Scene &scene,
                 Sampler &sampler, MemoryArena &arena, int depth) const;
 

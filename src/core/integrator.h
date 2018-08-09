@@ -96,13 +96,13 @@ class SamplerIntegrator : public Integrator {
                                        std::shared_ptr<Sampler> &tileSampler,
                                        MemoryArena &arena,
                                        std::unique_ptr<FilmTile> &filmTile,
-                                       std::vector<PointInfo> &pointInfoList);
+                                       std::vector<PointInfo> &pointInfoList, int batch);
     virtual Spectrum Li(const RayDifferential &ray, const Scene &scene,
                         Sampler &sampler, MemoryArena &arena,
                         int depth = 0) const = 0;
     virtual Spectrum Li2(const RayDifferential &ray, const Scene &scene,
                          Sampler &sampler, MemoryArena &arena,
-                         std::vector<PointInfo> &pointInfoList,
+                         std::vector<PointInfo> &pointInfoList, int batch,
                          int depth = 0) const {
         return 0.f;
     };
