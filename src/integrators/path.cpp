@@ -43,14 +43,20 @@
 #include "nanoflann.hpp"
 #include "utils.h"
 
+#include <numeric>
+
+#include "hj.h"
+
 namespace pbrt {
 
+#ifdef ADAPTIVE_SAMPLING
 typedef nanoflann::KDTreeSingleIndexAdaptor<
     nanoflann::L2_Simple_Adaptor<Float, PointCloud<Float>>, PointCloud<Float>,
     3 /* dim */
     >
     my_kd_tree_t;
 extern std::unique_ptr<my_kd_tree_t> kdtree;
+#endif
 
 STAT_PERCENT("Integrator/Zero-radiance paths", zeroRadiancePaths, totalPaths);
 STAT_INT_DISTRIBUTION("Integrator/Path length", pathLength);
@@ -71,7 +77,10 @@ void PathIntegrator::Preprocess(const Scene &scene, Sampler &sampler) {
         CreateLightSampleDistribution(lightSampleStrategy, scene);
 }
 int counter = 0;
-std::vector<std::pair<size_t, Float>> ret_matches;
+// declare vectors as global variable to avoid memory reallocation for each
+// function call
+std::vector<std::vector<std::pair<size_t, Float>>> ret_matches(
+    MaxThreadIndex());
 
 Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
                              Sampler &sampler, MemoryArena &arena,
@@ -91,12 +100,14 @@ Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
     // out of a medium and thus have their beta value increased.
     Float etaScale = 1;
 
+    PointInfo pInfo;
+
     for (bounces = 0;; ++bounces) {
         // Find next path vertex and accumulate contribution
         VLOG(2) << "Path tracer bounce " << bounces << ", current L = " << L
                 << ", beta = " << beta;
 
-        clock_t localStart, localTime;
+        clock_t localStart, localTime = 0;
 
         // Intersect _ray_ with scene and store intersection in _isect_
         SurfaceInteraction isect;
@@ -142,84 +153,139 @@ Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
             L += Ld;
         }
 
-        if (batch == 1 && bounces == 1) {
-            localTime = localStart - clock();
+        Float cdf[] = {0., 0.25, 0.5, 0.75, 1.0};
+        int sampleCounter[4] = {};
+        Spectrum sMean[4] = {};
+        Spectrum sVariance[4] = {};
+        clock_t time[4] = {};
+        Float eff[4] = {};
+#ifdef ADAPTIVE_SAMPLING
+        // std::cout << "batch: " << batch << std::endl;
+        if (batch == 1) {
+            if (bounces == 0) {
+                localStart = clock();
+            } else if (bounces == 1) {
+                localTime = clock() - localStart;
+                if (localTime == 0) counter++;
 
-            PointInfo pInfo;
-            pInfo.point = ray.o;
-            pInfo.direction = ray.d;
-            pInfo.time = localTime;
-            pInfo.radiance = L;
+                pInfo.time = localTime;
+                pInfo.radiance = L;
 
-            pointInfoList.push_back(pInfo);
+                pointInfoList.push_back(pInfo);
+            }
+
         } else if (batch == 2 && bounces == 1) {
             Float query[] = {ray.o.x, ray.o.y, ray.o.z};
-            nanoflann::SearchParams params;
-            ret_matches.clear();
 
-            const Float radius = 10;
+            const Float radius = 1;
             size_t nMatches =
-                kdtree->radiusSearch(query, radius, ret_matches, params);
-
+                kdtree->radiusSearch(query, radius, ret_matches[ThreadIndex],
+                                     nanoflann::SearchParams());
             if (nMatches == 0) {
-                counter++;
-                /*std::cout << "radiusSearch(): radius=" << radius << " -> "
-                          << nMatches << " matches\n";*/
-                /*for (size_t i = 0; i < nMatches; i++)
-                    std::cout << "idx[" << i << "]=" << ret_matches[i].first
-                              << " dist[" << i << "]=" << ret_matches[i].second
-                              << std::endl;*/
-                //std::cout << "\n";
-            }
+                // counter++;
+            } else {
+                // LOG(INFO) << nMatches << ": " << std::endl;
+                std::for_each(ret_matches[ThreadIndex].begin(),
+                              ret_matches[ThreadIndex].end(), [&](auto &var) {
+                                  auto &pInfo = pointInfoList[var.first];
+                                  Float rad = std::atan2f(pInfo.direction.y,
+                                                          pInfo.direction.x) /
+                                              (2 * Pi);
+                                  if (rad < 0) rad += 1.f;
+                                  int ind = std::floor(rad / 0.25);
+                                  if (ind == 4) ind = 3;
 
-            /*std::unique_ptr<kdres> res(kd_nearest_range(kd, query, 200));
-            if (res->size > 0 && res->size != counter) {
-                                std::cout << ray.o << ": " << res->size <<
-            std::endl; counter = res->size;
-            }
-            if (res->size > 1) {
-            if (false){
-                for (int i = 0; i < 4; ++i) cdf[i] = 0;
+                                  sampleCounter[ind]++;
+                                  sMean[ind] += pInfo.radiance;
+                                  time[ind] += pInfo.time;
+                              });
+                for (int i = 0; i < 4; ++i)
+                    if (sampleCounter[i] > 0) sMean[i] /= sampleCounter[i];
 
-                Spectrum sum[4] = {}, sumSquared[4] = {}, sMean[4],
-                         sVariance[4];
-                Float fMean[4], fVariance[4];
-                clock_t totalTime[4] = {};
-                int num[4] = {};
+                std::for_each(
+                    ret_matches[ThreadIndex].begin(),
+                    ret_matches[ThreadIndex].end(), [&](auto &var) {
+                        auto &dir = pointInfoList[var.first].direction;
+                        Float rad = std::atan2f(dir.y, dir.x) / (2 * Pi);
+                        if (rad < 0) rad += 1.f;
+                        int ind = std::floor(rad / 0.25);
+                        if (ind == 4) ind = 3;
 
-                for (int i = 0; i < res->size; ++i, res->riter++) {
-                    auto pInfo = (PointInfo *)(res->riter->item->data);
-                    std::cout << pInfo->direction << std::endl;
-                    int j = 0;
+                        sVariance[ind] +=
+                            (pointInfoList[var.first].radiance - sMean[ind]) *
+                            (pointInfoList[var.first].radiance - sMean[ind]);
+                    });
+                for (int i = 0; i < 4; ++i) {
+                    if (sampleCounter[i] <= 0) continue;
 
-                    sum[j] += pInfo->radiance;
-                    sumSquared[j] += pInfo->radiance * pInfo->radiance;
-                    totalTime[j] += pInfo->time;
-                    num[j]++;
-                }
-
-                for (int j = 0; j < 4; ++j) {
-                    if (num[j] <= 1) continue;
-                    sMean[j] = sum[j] / num[j];
-                    fMean[j] = (sMean[j][0] + sMean[j][1] + sMean[j][2]) / 3;
-
-                    sVariance[j] = sumSquared[j] / num[j] - sMean[j] * sMean[j];
-                    fVariance[j] =
-                        (sVariance[j][0] + sVariance[j][1] + sVariance[j][2]) /
+                    sVariance[i] /= sampleCounter[i];
+                    eff[i] =
+                        (sVariance[i][0] + sVariance[i][1] + sVariance[i][2]) /
                         3;
+                    eff[i] /= std::max(time[i], clock_t(1));
                 }
-            }*/
-        }
 
-        if (bounces == 0) {
-            localStart = clock();
+                Float effSum = std::accumulate(eff, eff + 4, 0.f);
+
+                for (int i = 1; i < 5; ++i) {
+                    cdf[i] = cdf[i - 1] + eff[i - 1] / effSum;
+                }
+                /*LOG(INFO) << cdf[1] << ", " << cdf[2] << ", " << cdf[3] << ", "
+                          << cdf[4];*/
+
+                /*std::sort(ret_matches.begin(), ret_matches.end(),
+                          [&pointInfoList](auto &lhs, auto &rhs) {
+                              auto &lhsDir = pointInfoList[lhs.first].direction;
+                              auto &rhsDir = pointInfoList[rhs.first].direction;
+                              Float lhsRad =
+                                  std::atan2f(lhsDir.y, lhsDir.x) / (2 * Pi);
+                              lhsRad = lhsRad < 0 ? lhsRad + 1 : lhsRad;
+                              Float rhsRad =
+                                  std::atan2f(rhsDir.y, rhsDir.x) / (2 * Pi);
+                              rhsRad = rhsRad < 0 ? rhsRad + 1 : rhsRad;
+                              return lhsRad < rhsRad;
+                          });
+
+                clock_t totalTime = std::accumulate(
+                    ret_matches[ThreadIndex].begin(),
+                    ret_matches[ThreadIndex].end(), clock_t(0),
+                    [&pointInfoList](clock_t a, std::pair<size_t, Float> &b) {
+                        return a + pointInfoList[b.first].time;
+                    });
+                Spectrum mean =
+                    std::accumulate(
+                        ret_matches[ThreadIndex].begin(),
+                        ret_matches[ThreadIndex].end(), Spectrum(0.f),
+                        [&pointInfoList](Spectrum a,
+                                         std::pair<size_t, Float> &b) {
+                            return a + pointInfoList[b.first].radiance;
+                        }) /
+                    nMatches;
+                Spectrum variance =
+                    std::accumulate(
+                        ret_matches[ThreadIndex].begin(),
+                        ret_matches[ThreadIndex].end(), Spectrum(0.f),
+                        [&pointInfoList, &mean](Spectrum a,
+                                                std::pair<size_t, Float> &b) {
+                            return a +
+                                   (pointInfoList[b.first].radiance - mean) *
+                                       (pointInfoList[b.first].radiance - mean);
+                        }) /
+                    nMatches;
+
+                Float fVariance = (variance[0] + variance[1] + variance[2]) / 3;
+                Float eff = fVariance / std::max(clock_t(1), totalTime);*/
+            }
         }
+#endif
+
         // Sample BSDF to get new path direction
         Vector3f wo = -ray.d, wi;
         Float pdf;
         BxDFType flags;
-        Spectrum f = isect.bsdf->Sample_f(wo, &wi, sampler.Get2D(), &pdf,
-                                          BSDF_ALL, &flags);
+        Spectrum f = isect.bsdf->Sample_f2(wo, &wi, sampler.Get2D(), &pdf, cdf,
+                                           BSDF_ALL, &flags);
+
         VLOG(2) << "Sampled BSDF, f = " << f << ", pdf = " << pdf;
         if (f.IsBlack() || pdf == 0.f) break;
         beta *= f * AbsDot(wi, isect.shading.n) / pdf;
@@ -235,6 +301,15 @@ Spectrum PathIntegrator::Li2(const RayDifferential &r, const Scene &scene,
             etaScale *= (Dot(wo, isect.n) > 0) ? (eta * eta) : 1 / (eta * eta);
         }
         ray = isect.SpawnRay(wi);
+
+#ifdef ADAPTIVE_SAMPLING
+        if (batch == 1 && bounces == 0) {
+            pInfo.point = ray.o;
+            // pInfo.direction = ray.d;
+            pInfo.direction = isect.bsdf->WorldToLocal(ray.d);
+            // std::cout << pInfo.direction << std::endl;
+        }
+#endif
 
         // Account for subsurface scattering, if applicable
         if (isect.bssrdf && (flags & BSDF_TRANSMISSION)) {

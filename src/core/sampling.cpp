@@ -129,6 +129,48 @@ Point2f ConcentricSampleDisk(const Point2f &u) {
     return r * Point2f(std::cos(theta), std::sin(theta));
 }
 
+Float uniformToWeighted(Float p, Float *cdf) {
+    // normalize
+    p /= Pi * 2;
+
+    const Float xrange[] = {0, 0.25f, 0.5f, 0.75f, 1.f};
+    Float *yrange = cdf;
+    // const Float yrange[] = {0, 0.1f, 0.3f, 0.6f, 1.f};
+
+    for (int i = 1; i < 5; ++i) {
+        if (p < yrange[i]) {
+            Float ratio = (p - yrange[i - 1]) / (yrange[i] - yrange[i - 1]);
+            return (ratio * (xrange[i] - xrange[i - 1]) + xrange[i - 1]) * Pi *
+                   2;
+        }
+    }
+    return 0.f;
+}
+
+Point2f ConcentricSampleDisk2(const Point2f &u, Float *cdf) {
+    // Map uniform random numbers to $[-1,1]^2$
+    Point2f uOffset = 2.f * u - Vector2f(1, 1);
+
+    // Handle degeneracy at the origin
+    if (uOffset.x == 0 && uOffset.y == 0) return Point2f(0, 0);
+
+    // Apply concentric mapping to point
+    Float theta, r;
+    if (std::abs(uOffset.x) > std::abs(uOffset.y)) {
+        r = uOffset.x;
+        theta = PiOver4 * (uOffset.y / uOffset.x);
+    } else {
+        r = uOffset.y;
+        theta = PiOver2 - PiOver4 * (uOffset.x / uOffset.y);
+    }
+
+    Point2f tmp = r * Point2f(std::cos(theta), std::sin(theta));
+    theta = uniformToWeighted(std::atan2f(tmp.y, tmp.x) + Pi, cdf);
+    r = std::abs(r);
+
+    return r * Point2f(std::cos(theta), std::sin(theta));
+}
+
 Float UniformConePdf(Float cosThetaMax) {
     return 1 / (2 * Pi * (1 - cosThetaMax));
 }

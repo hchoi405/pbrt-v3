@@ -619,7 +619,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
         }
         const int BATCH_SIZE = SPP / params.batch;
 
-        // to exclude cold cache latency, remove some rows
         const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * imageY;
 
         std::vector<std::unique_ptr<FilmTile>> filmTileArray;
@@ -661,12 +660,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
         std::vector<std::vector<PointInfo>> pointInfoList(MaxThreadIndex());
+        std::vector<PointInfo> globalPointInfoList;
         PointCloud<Float> cloud;
         {
+            bool estimate = true;
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
             for (int batch = 1; batch <= params.batch; ++batch) {
                 printf("--------------- [Batch%d] ---------------\n", batch);
-
                 ParallelFor(
                     [&](int64_t iter) {
                         auto &pEff = efficiencyList[iter];
@@ -703,10 +703,16 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         clock_t localTime, localStart = clock();
 
                         // ray tracing and shading
+                        std::vector<PointInfo> *currentPointInfoList = nullptr;
+                        if (estimate) {
+                            currentPointInfoList = &pointInfoList[ThreadIndex];
+                        } else {
+                            currentPointInfoList = &globalPointInfoList;
+                        }
                         auto radianceValues = processPixel(
                             pixel, remainingSamples[pixelIndex], scene,
                             tileSampler, arena, filmTileArray[pixelIndex],
-                            pointInfoList[ThreadIndex], batch);
+                            *currentPointInfoList, batch);
 
                         localTime = std::clock() - localStart;
 
@@ -729,8 +735,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         // counter[pixelIndex] = std::clock() - start;
                     },
                     efficiencyList.size());
+
+                // Do estimation and reconstruction alternately
+                estimate = !estimate;
+
                 std::cout << "zero counter: " << counter << std::endl;
-                // do not sort at last iteration
+
+                // do not make sampling map at last iteration
                 if (batch != params.batch) {
                     printf("Start Adaptive Sampling\n");
                     clock_t overheadStart = clock();
@@ -758,14 +769,18 @@ void SamplerIntegrator::Render(const Scene &scene) {
                               });
 #else
 
+                    globalPointInfoList.clear();
                     for (int i = 0; i < MaxThreadIndex(); ++i) {
+                        globalPointInfoList.insert(globalPointInfoList.end(),
+                                                   pointInfoList[i].begin(),
+                                                   pointInfoList[i].end());
                         for (auto pointInfo : pointInfoList[i]) {
                             auto &p = pointInfo.point;
                             cloud.pts.push_back({p.x, p.y, p.z});
                         }
                     }
 
-					kdtree = std::unique_ptr<my_kd_tree_t>(new my_kd_tree_t(
+                    kdtree = std::unique_ptr<my_kd_tree_t>(new my_kd_tree_t(
                         3, cloud,
                         nanoflann::KDTreeSingleIndexAdaptorParams(10)));
                     kdtree->buildIndex();
