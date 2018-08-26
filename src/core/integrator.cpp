@@ -1,6 +1,3 @@
-#define ADAPTIVE_SAMPLING
-//#define IMAGE_SPACE
-
 /*
     pbrt source code is Copyright(c) 1998-2016
                         Matt Pharr, Greg Humphreys, and Wenzel Jakob.
@@ -245,33 +242,31 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 enum class ASMethod { Rvariance, Efficiency };
 
 struct PixelEfficiency {
-    pbrt::Point2i pixel;
-    std::shared_ptr<pbrt::Sampler> sampler;
+    Point2i pixel;
+    std::shared_ptr<Sampler> sampler;
     uint32_t n;
-    pbrt::Float mean;
-    pbrt::Float variance;
-    pbrt::Float time;
-    pbrt::Float efficiency;
+    Float mean;
+    Float variance;
+    Float time;
+    Float efficiency;
 
-    PixelEfficiency(pbrt::Point2i _pixel,
-                    std::shared_ptr<pbrt::Sampler> _sampler)
+    PixelEfficiency(Point2i _pixel, std::shared_ptr<Sampler> _sampler)
         : pixel(_pixel),
           sampler(_sampler),
           n(0),
-          mean(pbrt::Float(0)),
-          variance(pbrt::Float(0)),
-          time(pbrt::Float(0)),
-          efficiency(pbrt::Float(0)) {}
+          mean(Float(0)),
+          variance(Float(0)),
+          time(Float(0)),
+          efficiency(Float(0)) {}
 
-    void updateStats(uint32_t m, pbrt::Float mMean, pbrt::Float mVariance,
-                     pbrt::Float mTime) {
-        pbrt::Float mn = n + m;
-        pbrt::Float mnMean = (n * mean + m * mMean) / mn;
-        pbrt::Float mnVariance =
+    void updateStats(uint32_t m, Float mMean, Float mVariance, Float mTime) {
+        Float mn = n + m;
+        Float mnMean = (n * mean + m * mMean) / mn;
+        Float mnVariance =
             (n * (variance + mean * mean) + m * (mVariance + mMean * mMean)) /
                 mn -
             mnMean * mnMean;
-        pbrt::Float mnTime = (n * time + m * mTime) / mn;
+        Float mnTime = (n * time + m * mTime) / mn;
 
         this->n = mn;
         this->mean = mnMean;
@@ -280,7 +275,7 @@ struct PixelEfficiency {
     }
 
     void updateEfficiency(ASMethod method) {
-        pbrt::Float relativeVariance = variance / pow(mean + 0.0001, 2.0);
+        Float relativeVariance = variance / pow(mean + 0.0001, 2.0);
 
         // different metrics
         switch (method) {
@@ -295,13 +290,13 @@ struct PixelEfficiency {
 };
 
 struct ExecutionResult {
-    pbrt::Float time;
+    Float time;
 };
 
 struct ExecutionParams {
     int spp;
     ASMethod method;
-    pbrt::Float clampThreshold;
+    Float clampThreshold;
     int maxSppRatio;
     int batch;
 
@@ -351,7 +346,6 @@ template <typename T>
 T getVariance(std::vector<T> &arr, T mean) {
     return std::accumulate(arr.begin(), arr.end(), T(0.f),
                            [&mean](const T &a, const T &b) {
-                               // std::cout << a << ", " << b << std::endl;
                                return a + (b - mean) * (b - mean);
                            }) /
            arr.size();
@@ -359,76 +353,73 @@ T getVariance(std::vector<T> &arr, T mean) {
 
 template <typename T>
 void writeImage(std::string path, std::string filename, std::vector<T> &values,
-                pbrt::Point2i res, const int OFFSET) {
+                Point2i res, const int OFFSET) {
     writeImage(path.c_str(), filename.c_str(), values, res, OFFSET);
 }
 template <typename T>
 void writeImage(const char path[], const char filename[],
-                std::vector<T> &values, pbrt::Point2i res, const int OFFSET) {
-    std::unique_ptr<pbrt::Float[]> rgb(new pbrt::Float[3 * res.x * res.y]);
+                std::vector<T> &values, Point2i res, const int OFFSET) {
+    std::unique_ptr<Float[]> rgb(new Float[3 * res.x * res.y]);
 
     auto minmax = std::minmax_element(values.begin(), values.end());
-    pbrt::Float maxValue =
-        (minmax.second != values.end()) ? *minmax.second : 0.0;
-    pbrt::Float minValue = (minmax.first != values.end()) ? *minmax.first : 0.0;
+    Float maxValue = (minmax.second != values.end()) ? *minmax.second : 0.0;
+    Float minValue = (minmax.first != values.end()) ? *minmax.first : 0.0;
 
     if (values.size() == res.y * res.x)
         for (int i = 0; i < res.y; ++i) {
             for (int j = 0; j < res.x; ++j) {
                 int ind = i * res.x + j;
-                rgb[3 * ind + 0] = pbrt::Float(values[OFFSET + ind]);
-                rgb[3 * ind + 1] = pbrt::Float(values[OFFSET + ind]);
-                rgb[3 * ind + 2] = pbrt::Float(values[OFFSET + ind]);
+                rgb[3 * ind + 0] = Float(values[OFFSET + ind]);
+                rgb[3 * ind + 1] = Float(values[OFFSET + ind]);
+                rgb[3 * ind + 2] = Float(values[OFFSET + ind]);
             }
         }
 
     char newfilename[255];
     sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path, filename, minValue,
             maxValue);
-    pbrt::WriteImage(
-        newfilename, &rgb[0],
-        pbrt::Bounds2i(pbrt::Point2i(0, 0), pbrt::Point2i(res.x, res.y)),
-        pbrt::Point2i(res.x, res.y));
+    WriteImage(newfilename, &rgb[0],
+               Bounds2i(Point2i(0, 0), Point2i(res.x, res.y)),
+               Point2i(res.x, res.y));
 }
 
 template <typename T>
 void writeText(std::string path, std::string filename, std::vector<T> &values,
-               pbrt::Point2i res, const int OFFSET) {
+               Point2i res, const int OFFSET) {
     writeText(path.c_str(), filename.c_str(), values, res, OFFSET);
 }
 
 template <typename T>
 void writeText(const char path[], const char filename[], std::vector<T> &values,
-               pbrt::Point2i res, const int OFFSET) {
+               Point2i res, const int OFFSET) {
     char newfilename[255];
 
     if (!values.empty()) {
         auto minmax = std::minmax_element(values.begin(), values.end());
-        pbrt::Float maxValue = *minmax.second;
-        pbrt::Float minValue = *minmax.first;
+        Float maxValue = *minmax.second;
+        Float minValue = *minmax.first;
     }
 
     sprintf(newfilename, "%sstat_%s.txt", path, filename);
     std::ofstream out(newfilename);
     char tmp[255];
     for (int i = OFFSET; i < values.size(); ++i) {
-        sprintf(tmp, "%f\n", pbrt::Float(values[i]));
+        sprintf(tmp, "%f\n", Float(values[i]));
         out << tmp;
     }
     out.close();
 }
 
-std::pair<pbrt::Float, pbrt::Float> diff2(std::string gtPath, std::string in) {
-    std::pair<pbrt::Float, pbrt::Float> result;
+std::pair<Float, Float> diff2(std::string gtPath, std::string in) {
+    std::pair<Float, Float> result;
 
     float tol = 0.;
     const char *outfile = nullptr;
 
     const char *filename[2] = {gtPath.c_str(), in.c_str()};
-    pbrt::Point2i res[2];
-    std::unique_ptr<pbrt::RGBSpectrum[]> imgs[2] = {
-        pbrt::ReadImage(filename[0], &res[0]),
-        pbrt::ReadImage(filename[1], &res[1])};
+    Point2i res[2];
+    std::unique_ptr<RGBSpectrum[]> imgs[2] = {ReadImage(filename[0], &res[0]),
+                                              ReadImage(filename[1], &res[1])};
     if (!imgs[0]) {
         fprintf(stderr, "%s: unable to read image\n", filename[0]);
         return result;
@@ -451,13 +442,13 @@ std::pair<pbrt::Float, pbrt::Float> diff2(std::string gtPath, std::string in) {
     double rmse = 0.0;
     double mse = 0.0;
     for (int i = 0; i < res[0].x * res[0].y; ++i) {
-        pbrt::Float rgb[2][3];
+        Float rgb[2][3];
         imgs[0][i].ToRGB(rgb[0]);
         imgs[1][i].ToRGB(rgb[1]);
 
-        pbrt::Float diffRGB[3];
+        Float diffRGB[3];
         for (int c = 0; c < 3; ++c) {
-            pbrt::Float c0 = rgb[0][c], c1 = rgb[1][c];
+            Float c0 = rgb[0][c], c1 = rgb[1][c];
             diffRGB[c] = std::abs(c0 - c1);
 
             if (c0 == 0 && c1 == 0) continue;

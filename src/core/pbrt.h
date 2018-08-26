@@ -490,3 +490,6 @@ inline Float Erf(Float x) {
 }  // namespace pbrt
 
 #endif  // PBRT_CORE_PBRT_H
+
+#define ADAPTIVE_SAMPLING
+//#define IMAGE_SPACE
