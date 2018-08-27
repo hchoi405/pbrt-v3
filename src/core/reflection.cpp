@@ -406,9 +406,8 @@ Spectrum BxDF::Sample_f2(const Vector3f &wo, Vector3f *wi, const Point2f &u,
 Float BxDF::Pdf2(const Vector3f &wo, const Vector3f &wi,
                  Float anotherPdf) const {
     // modified to use MIS
-    return SameHemisphere(wo, wi)
-               ? (AbsCosTheta(wi) * InvPi + anotherPdf) * 0.5
-               : 0;
+    return SameHemisphere(wo, wi) ? (AbsCosTheta(wi) * InvPi + anotherPdf) * 0.5
+                                  : 0;
 }
 
 Spectrum LambertianTransmission::Sample_f(const Vector3f &wo, Vector3f *wi,

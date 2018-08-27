@@ -30,6 +30,7 @@
  */
 
 // core/integrator.cpp*
+#include "integrator.h"
 #include <array>
 #include <ctime>
 #include <fstream>
@@ -37,7 +38,6 @@
 #include "camera.h"
 #include "film.h"
 #include "imageio.h"
-#include "integrator.h"
 #include "interaction.h"
 #include "parallel.h"
 #include "paramset.h"
@@ -774,7 +774,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                               });
 #else
 
-					// push points to k-d tree
+                    // push points to k-d tree
                     globalPointInfoList.clear();
                     for (int i = 0; i < MaxThreadIndex(); ++i) {
                         globalPointInfoList.insert(globalPointInfoList.end(),
@@ -786,7 +786,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         }
                     }
 
-					// build k-d tree
+                    // build k-d tree
                     kdtree = std::unique_ptr<my_kd_tree_t>(new my_kd_tree_t(
                         3, cloud,
                         nanoflann::KDTreeSingleIndexAdaptorParams(10)));

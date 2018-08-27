@@ -30,7 +30,6 @@
 
  */
 
-
 // core/sampling.cpp*
 #include "sampling.h"
 #include "geometry.h"
@@ -145,7 +144,8 @@ Float uniformToWeighted(Float u, Float *inputCdf, Float *outputPdf) {
     return 0.f;
 }
 
-Point2f ConcentricSampleDisk2(const Point2f &u, Float *inputCdf, Float *outputPdf) {
+Point2f ConcentricSampleDisk2(const Point2f &u, Float *inputCdf,
+                              Float *outputPdf) {
     // Map uniform random numbers to $[-1,1]^2$
     Point2f uOffset = 2.f * u - Vector2f(1, 1);
 
@@ -162,7 +162,7 @@ Point2f ConcentricSampleDisk2(const Point2f &u, Float *inputCdf, Float *outputPd
         theta = PiOver2 - PiOver4 * (uOffset.x / uOffset.y);
     }
 
-	// TODO: Remove redundancy here
+    // TODO: Remove redundancy here
     Point2f tmp = r * Point2f(std::cos(theta), std::sin(theta));
     Float uniform = (std::atan2f(tmp.y, tmp.x) + Pi) / (Pi * 2);
     Float weightedTheta = uniformToWeighted(uniform, inputCdf, outputPdf);

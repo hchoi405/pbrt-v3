@@ -31,10 +31,10 @@
  */
 
 // integrators/path.cpp*
+#include "integrators/path.h"
 #include "bssrdf.h"
 #include "camera.h"
 #include "film.h"
-#include "integrators/path.h"
 #include "interaction.h"
 #include "paramset.h"
 #include "scene.h"
