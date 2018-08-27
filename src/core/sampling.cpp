@@ -129,17 +129,15 @@ Point2f ConcentricSampleDisk(const Point2f &u) {
     return r * Point2f(std::cos(theta), std::sin(theta));
 }
 
-Float uniformToWeighted(Float p, Float *cdf) {
-    // normalize
-    p /= Pi * 2;
-
-    const Float xrange[] = {0, 0.25f, 0.5f, 0.75f, 1.f};
-    Float *yrange = cdf;
-    // const Float yrange[] = {0, 0.1f, 0.3f, 0.6f, 1.f};
+Float uniformToWeighted(Float u, Float *inputCdf, Float *outputPdf) {
+    // fixed x range for now
+    static const Float xrange[] = {0, 0.25f, 0.5f, 0.75f, 1.f};
+    Float *yrange = inputCdf;
 
     for (int i = 1; i < 5; ++i) {
-        if (p < yrange[i]) {
-            Float ratio = (p - yrange[i - 1]) / (yrange[i] - yrange[i - 1]);
+        if (u < yrange[i]) {
+            *outputPdf = yrange[i] - yrange[i - 1];
+            Float ratio = (u - yrange[i - 1]) / (yrange[i] - yrange[i - 1]);
             return (ratio * (xrange[i] - xrange[i - 1]) + xrange[i - 1]) * Pi *
                    2;
         }
@@ -147,7 +145,7 @@ Float uniformToWeighted(Float p, Float *cdf) {
     return 0.f;
 }
 
-Point2f ConcentricSampleDisk2(const Point2f &u, Float *cdf) {
+Point2f ConcentricSampleDisk2(const Point2f &u, Float *inputCdf, Float *outputPdf) {
     // Map uniform random numbers to $[-1,1]^2$
     Point2f uOffset = 2.f * u - Vector2f(1, 1);
 
@@ -164,11 +162,13 @@ Point2f ConcentricSampleDisk2(const Point2f &u, Float *cdf) {
         theta = PiOver2 - PiOver4 * (uOffset.x / uOffset.y);
     }
 
+	// TODO: Remove redundancy here
     Point2f tmp = r * Point2f(std::cos(theta), std::sin(theta));
-    theta = uniformToWeighted(std::atan2f(tmp.y, tmp.x) + Pi, cdf);
+    Float uniform = (std::atan2f(tmp.y, tmp.x) + Pi) / (Pi * 2);
+    Float weightedTheta = uniformToWeighted(uniform, inputCdf, outputPdf);
     r = std::abs(r);
 
-    return r * Point2f(std::cos(theta), std::sin(theta));
+    return r * Point2f(std::cos(weightedTheta), std::sin(weightedTheta));
 }
 
 Float UniformConePdf(Float cosThetaMax) {

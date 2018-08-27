@@ -54,6 +54,9 @@ struct PointInfo {
     Vector3f direction;
     clock_t time;
     Spectrum radiance;
+
+	// store calculation results for re-use purpose
+	size_t index;
 };
 
 // Integrator Declarations

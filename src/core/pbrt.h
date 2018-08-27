@@ -487,6 +487,9 @@ inline Float Erf(Float x) {
     return sign * y;
 }
 
+enum class ASMethod { Rvariance, Efficiency };
+static ASMethod currentMethod = ASMethod::Rvariance;
+
 }  // namespace pbrt
 
 #endif  // PBRT_CORE_PBRT_H

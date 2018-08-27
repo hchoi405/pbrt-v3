@@ -182,7 +182,7 @@ class BSDF {
                       Float *pdf, BxDFType type = BSDF_ALL,
                       BxDFType *sampledType = nullptr) const;
     Spectrum Sample_f2(const Vector3f &wo, Vector3f *wi, const Point2f &u,
-                       Float *pdf, Float* inputPdf, BxDFType type = BSDF_ALL,
+                       Float *pdf, Float *inputCdf, BxDFType type = BSDF_ALL,
                        BxDFType *sampledType = nullptr) const;
     Float Pdf(const Vector3f &wo, const Vector3f &wi,
               BxDFType flags = BSDF_ALL) const;
@@ -221,13 +221,15 @@ class BxDF {
                               const Point2f &sample, Float *pdf,
                               BxDFType *sampledType = nullptr) const;
     virtual Spectrum Sample_f2(const Vector3f &wo, Vector3f *wi,
-                              const Point2f &sample, Float *pdf, Float* inputPdf,
+                               const Point2f &sample, Float *pdf,
+                               Float *inputCdf,
                               BxDFType *sampledType = nullptr) const;
     virtual Spectrum rho(const Vector3f &wo, int nSamples,
                          const Point2f *samples) const;
     virtual Spectrum rho(int nSamples, const Point2f *samples1,
                          const Point2f *samples2) const;
     virtual Float Pdf(const Vector3f &wo, const Vector3f &wi) const;
+    virtual Float Pdf2(const Vector3f &wo, const Vector3f &wi, Float anotherPdf) const;
     virtual std::string ToString() const = 0;
 
     // BxDF Public Data

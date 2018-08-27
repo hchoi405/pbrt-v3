@@ -386,17 +386,29 @@ Spectrum BxDF::Sample_f(const Vector3f &wo, Vector3f *wi, const Point2f &u,
     return f(wo, *wi);
 }
 
+Float BxDF::Pdf(const Vector3f &wo, const Vector3f &wi) const {
+    return SameHemisphere(wo, wi) ? AbsCosTheta(wi) * InvPi : 0;
+}
+
 Spectrum BxDF::Sample_f2(const Vector3f &wo, Vector3f *wi, const Point2f &u,
-                        Float *pdf, Float* inputPdf, BxDFType *sampledType) const {
+                         Float *pdf, Float *inputCdf,
+                         BxDFType *sampledType) const {
     // Cosine-sample the hemisphere, flipping the direction if necessary
-    *wi = CosineSampleHemisphere2(u, inputPdf);
+    Float outputPdf;
+    *wi = CosineSampleHemisphere2(u, inputCdf, &outputPdf);
     if (wo.z < 0) wi->z *= -1;
-    *pdf = Pdf(wo, *wi);
+    *pdf = Pdf2(wo, *wi, outputPdf);
+
+    // probability for the direction it chose
     return f(wo, *wi);
 }
 
-Float BxDF::Pdf(const Vector3f &wo, const Vector3f &wi) const {
-    return SameHemisphere(wo, wi) ? AbsCosTheta(wi) * InvPi : 0;
+Float BxDF::Pdf2(const Vector3f &wo, const Vector3f &wi,
+                 Float anotherPdf) const {
+    // modified to use MIS
+    return SameHemisphere(wo, wi)
+               ? (AbsCosTheta(wi) * InvPi + anotherPdf) * 0.5
+               : 0;
 }
 
 Spectrum LambertianTransmission::Sample_f(const Vector3f &wo, Vector3f *wi,
@@ -783,8 +795,8 @@ Spectrum BSDF::Sample_f(const Vector3f &woWorld, Vector3f *wiWorld,
 }
 
 Spectrum BSDF::Sample_f2(const Vector3f &woWorld, Vector3f *wiWorld,
-                        const Point2f &u, Float *pdf, Float* inputPdf, BxDFType type,
-                        BxDFType *sampledType) const {
+                         const Point2f &u, Float *pdf, Float *inputCdf,
+                         BxDFType type, BxDFType *sampledType) const {
     ProfilePhase pp(Prof::BSDFSampling);
     // Choose which _BxDF_ to sample
     int matchingComps = NumComponents(type);
@@ -818,7 +830,8 @@ Spectrum BSDF::Sample_f2(const Vector3f &woWorld, Vector3f *wiWorld,
     if (wo.z == 0) return 0.;
     *pdf = 0;
     if (sampledType) *sampledType = bxdf->type;
-    Spectrum f = bxdf->Sample_f2(wo, &wi, uRemapped, pdf, inputPdf, sampledType);
+    Spectrum f =
+        bxdf->Sample_f2(wo, &wi, uRemapped, pdf, inputCdf, sampledType);
     VLOG(2) << "For wo = " << wo << ", sampled f = " << f << ", pdf = " << *pdf
             << ", ratio = " << ((*pdf > 0) ? (f / *pdf) : Spectrum(0.))
             << ", wi = " << wi;

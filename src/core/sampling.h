@@ -120,7 +120,7 @@ Float UniformConePdf(Float thetamax);
 Point2f UniformSampleDisk(const Point2f &u);
 Point2f ConcentricSampleDisk(const Point2f &u);
 Float uniformToWeighted(Float p, Float *pdf);
-Point2f ConcentricSampleDisk2(const Point2f &u, Float *pdf);
+Point2f ConcentricSampleDisk2(const Point2f &u, Float *inputCdf, Float *outputPdf);
 Point2f UniformSampleTriangle(const Point2f &u);
 class Distribution2D {
   public:
@@ -166,8 +166,8 @@ inline Vector3f CosineSampleHemisphere(const Point2f &u) {
 
 inline Float CosineHemispherePdf(Float cosTheta) { return cosTheta * InvPi; }
 
-inline Vector3f CosineSampleHemisphere2(const Point2f &u, Float* cdf) {
-    Point2f d = ConcentricSampleDisk2(u, cdf);
+inline Vector3f CosineSampleHemisphere2(const Point2f &u, Float* inputCdf, Float* outputPdf) {
+    Point2f d = ConcentricSampleDisk2(u, inputCdf, outputPdf);
     Float z = std::sqrt(std::max((Float)0, 1 - d.x * d.x - d.y * d.y));
     return Vector3f(d.x, d.y, z);
 }

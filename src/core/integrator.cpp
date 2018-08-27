@@ -239,8 +239,6 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 
 #ifdef ADAPTIVE_SAMPLING
 
-enum class ASMethod { Rvariance, Efficiency };
-
 struct PixelEfficiency {
     Point2i pixel;
     std::shared_ptr<Sampler> sampler;
@@ -259,7 +257,7 @@ struct PixelEfficiency {
           time(Float(0)),
           efficiency(Float(0)) {}
 
-    void updateStats(uint32_t m, Float mMean, Float mVariance, Float mTime) {
+    void updateStats(size_t m, Float mMean, Float mVariance, Float mTime) {
         Float mn = n + m;
         Float mnMean = (n * mean + m * mMean) / mn;
         Float mnVariance =
@@ -588,12 +586,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
     Executor exec;
 
     int rvarSpp = 128;
-    int effSpp = 154;
+    int effSpp = 128;
     // dummy params to remove cold cache
     exec.addParams({rvarSpp, ASMethod::Rvariance, 1.0, 0, 2});
 
-    // exec.addParams({rvarSpp, ASMethod::Rvariance, 1.0, 0, 2});
-    // exec.addParams({effSpp, ASMethod::Efficiency, 1.0, 0, 2});
+    exec.addParams({rvarSpp, ASMethod::Rvariance, 1.0, 0, 2});
+    exec.addParams({effSpp, ASMethod::Efficiency, 1.0, 0, 2});
     // exec.addParams({rvarSpp, ASMethod::Rvariance, 0.9999, 0, 2});
     // exec.addParams({effSpp, ASMethod::Efficiency, 0.9999, 0, 2});
     // exec.addParams({rvarSpp, ASMethod::Rvariance, 0.999, 0, 2});
@@ -603,6 +601,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
     for (int exe = 0; exe < exec.getNum(); ++exe) {
         ExecutionParams params = exec.getParams(exe);
+        currentMethod = params.method;
+
+        // initialize global variables
+        counter = 0;
+        delete kdtree.release();
+
+        // create folder for this params
         std::string path = "results\\" + params.getDirectoryName() + "\\";
         Executor::createFolder(path);
 
@@ -742,7 +747,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 std::cout << "zero counter: " << counter << std::endl;
 
                 // do not make sampling map at last iteration
-                if (batch != params.batch) {
+                if (batch < params.batch) {
                     printf("Start Adaptive Sampling\n");
                     clock_t overheadStart = clock();
 
@@ -769,6 +774,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                               });
 #else
 
+					// push points to k-d tree
                     globalPointInfoList.clear();
                     for (int i = 0; i < MaxThreadIndex(); ++i) {
                         globalPointInfoList.insert(globalPointInfoList.end(),
@@ -780,11 +786,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         }
                     }
 
+					// build k-d tree
                     kdtree = std::unique_ptr<my_kd_tree_t>(new my_kd_tree_t(
                         3, cloud,
                         nanoflann::KDTreeSingleIndexAdaptorParams(10)));
                     kdtree->buildIndex();
 
+                    // equal efficiency in image space
                     std::for_each(efficiencyList.begin(), efficiencyList.end(),
                                   [&params](PixelEfficiency &pEff) {
                                       pEff.efficiency = 1;
@@ -846,9 +854,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
                overheadTime / Float(CLOCKS_PER_SEC));
         printf("Time without overhead: %fs\n",
                (globalTime - overheadTime) / Float(CLOCKS_PER_SEC));
-        printf("Counted samples: %u\n",
-               std::accumulate(globalSampleCounter.begin(),
-                               globalSampleCounter.end(), 0));
+        size_t totalSample = std::accumulate(globalSampleCounter.begin(),
+                                             globalSampleCounter.end(), 0);
+        printf("Counted samples: %u\n", totalSample);
         ExecutionResult result;
         result.time = globalTime / Float(CLOCKS_PER_SEC);
         exec.addResult(result);
@@ -868,9 +876,14 @@ void SamplerIntegrator::Render(const Scene &scene) {
             timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
         }
 
+        // [Indicator] =======================================
         auto timeIndicator = std::to_string(globalTime / Float(CLOCKS_PER_SEC));
         writeText(path, timeIndicator.c_str(), std::vector<int>(), Point2i(),
                   0);
+        char tmp[255];
+        sprintf(tmp, "zero_(%d%%)_(%d/%d)", (counter * 100) / SAMPLES_PER_BATCH,
+                counter, SAMPLES_PER_BATCH);
+        writeText(path, tmp, std::vector<int>(), Point2i(), 0);
 
         // [Create Text] =====================================
         // writeText(path, "raynum", totalSampleNum, Point2i(256, 256), 0);
@@ -898,7 +911,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         auto mse = diff2(PATH_GT, camera->film->filename);
         // printf("mse(%f), rmse(%f)\n", mse.first, mse.second);
-        char tmp[255];
         sprintf(tmp, "mse(%.10f),rmse(%.9f)", mse.first, mse.second);
         writeText(path, tmp, std::vector<Float>(), Point2i(), 0);
     }
