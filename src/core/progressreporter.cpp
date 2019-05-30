@@ -135,8 +135,10 @@ void ProgressReporter::PrintBar() {
         // Update elapsed time and estimated time to completion
         Float seconds = ElapsedMS() / 1000.f;
         Float estRemaining = seconds / percentDone - seconds;
-        if (percentDone == 1.f)
+        if (percentDone == 1.f) {
             printf(" (%.1fs)       ", seconds);
+            exitThread = true;
+        }
         else if (!std::isinf(estRemaining))
             printf(" (%.1fs|%.1fs)  ", seconds,
                    std::max((Float)0., estRemaining));
