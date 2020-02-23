@@ -1,5 +1,9 @@
 #pragma once
+#ifdef _WIN32
 #include <windows.h>
+#elif defined __linux__
+#include <sys/stat.h>
+#endif
 #include <string>
 #include <vector>
 #include "imageio.h"
@@ -43,7 +47,7 @@ struct PixelEfficiency {
     }
 
     void updateEfficiency(ASMethod method) {
-        Float relativeVariance = variance / pow(mean + 0.0001, 2.0);
+        Float relativeVariance = variance / pow(mean + Float(0.0001), Float(2.0));
 
         // different metrics
         switch (method) {
@@ -51,7 +55,7 @@ struct PixelEfficiency {
             efficiency = relativeVariance;
             break;
         case ASMethod::Efficiency:
-            efficiency = relativeVariance / std::max(time, 1.0);
+            efficiency = relativeVariance / std::max(time, Float(1.0));
             break;
         }
 	}
@@ -87,11 +91,18 @@ struct ExecutionParams {
 };
 
 void createDirectory(std::string path) {
+#ifdef _WIN32
     if (CreateDirectory(path.c_str(), NULL) ||
         ERROR_ALREADY_EXISTS == GetLastError()) {
     } else {
         std::cout << "failed to create directory: " << path << std::endl;
     }
+#else
+    std::replace(path.begin(), path.end(), '\\', '/');
+    if (mkdir(path.c_str(), 0777) == -1) {
+        std::cout << "failed to create directory: " << path << std::endl;
+    }
+#endif
 }
 
 class Executor {
@@ -122,11 +133,6 @@ T getVariance(std::vector<T> &arr, T mean) {
 template <typename T>
 void writeImage(std::string path, std::string filename, std::vector<T> &values,
                 Point2i res, const int OFFSET) {
-    writeImage(path.c_str(), filename.c_str(), values, res, OFFSET);
-}
-template <typename T>
-void writeImage(const char path[], const char filename[],
-                std::vector<T> &values, Point2i res, const int OFFSET) {
     std::unique_ptr<Float[]> rgb(new Float[3 * res.x * res.y]);
 
     auto minmax = std::minmax_element(values.begin(), values.end());
@@ -142,7 +148,7 @@ void writeImage(const char path[], const char filename[],
     }
 
     char newfilename[255];
-    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path, filename, minValue,
+    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path.c_str(), filename.c_str(), minValue,
             maxValue);
     pbrt::WriteImage(newfilename, &rgb[0],
                      Bounds2i(Point2i(0, 0), Point2i(res.x, res.y)),
@@ -152,23 +158,13 @@ void writeImage(const char path[], const char filename[],
 template <typename T>
 void writeText(std::string path, std::string filename, std::vector<T> &values,
                Point2i res, const int OFFSET) {
-    writeText(path.c_str(), filename.c_str(), values, res, OFFSET);
-}
-
-template <typename T>
-void writeText(const char path[], const char filename[], std::vector<T> &values,
-               Point2i res, const int OFFSET) {
     char newfilename[255];
 
-    auto minmax = std::minmax_element(values.begin(), values.end());
-    Float maxValue = *minmax.second;
-    Float minValue = *minmax.first;
-
-    sprintf(newfilename, "%sstat_%s.txt", path, filename);
+    sprintf(newfilename, "%sstat_%s.txt", path.c_str(), filename.c_str());
     std::ofstream out(newfilename);
     char tmp[255];
     for (int i = OFFSET; i < values.size(); ++i) {
-        sprintf(tmp, "%f\n", values[i]);
+        sprintf(tmp, "%f\n", Float(values[i]));
         out << tmp;
     }
     out.close();
