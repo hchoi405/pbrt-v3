@@ -31,6 +31,7 @@ struct PixelEfficiency {
           time(Float(0)),
           efficiency(Float(0)) {}
 
+    // Update the mean/variance using moving average method
     void updateStats(uint32_t m, Float mMean, Float mVariance, Float mTime) {
         Float mn = n + m;
         Float mnMean = (n * mean + m * mMean) / mn;
@@ -141,9 +142,9 @@ void writeImage(std::string path, std::string filename, std::vector<T> &values,
     for (int i = 0; i < res.y; ++i) {
         for (int j = 0; j < res.x; ++j) {
             int ind = i * res.x + j;
-            rgb[3 * ind + 0] = Float(values[OFFSET + ind]);
-            rgb[3 * ind + 1] = Float(values[OFFSET + ind]);
-            rgb[3 * ind + 2] = Float(values[OFFSET + ind]);
+            rgb[3 * ind + 0] = Float(values[OFFSET + ind]) / maxValue;
+            rgb[3 * ind + 1] = Float(values[OFFSET + ind]) / maxValue;
+            rgb[3 * ind + 2] = Float(values[OFFSET + ind]) / maxValue;
         }
     }
 

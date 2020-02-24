@@ -34,6 +34,7 @@
 // core/integrator.cpp*
 #include "integrator.h"
 #include <array>
+#include <chrono>
 #include <ctime>
 #include <fstream>
 #include <numeric>
@@ -52,7 +53,8 @@
 #include "stats.h"
 
 namespace pbrt {
-
+using hclock = std::chrono::high_resolution_clock;
+using duration = std::chrono::duration<double>;
 STAT_COUNTER("Integrator/Camera rays traced", nCameraRays);
 
 // Integrator Method Definitions
@@ -353,9 +355,14 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         const int BATCH_SIZE = SPP / params.batch;
         if (SPP % BATCH_SIZE != 0) {
-            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)",
+            printf("SPP(%ld) is not dividible by BATCH_SIZE(%d)",
                    sampler->samplesPerPixel, BATCH_SIZE);
-            exit(1);
+            std::cout << std::endl;
+            exit(-1);
+        } else if (BATCH_SIZE == 1) {
+            printf("BATCH_SIZE (SPP / params.betch) should larger than 1");
+            std::cout << std::endl;
+            exit(-1);
         }
         const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
 
@@ -376,18 +383,18 @@ void SamplerIntegrator::Render(const Scene &scene) {
             }
         }
 
-        std::vector<PixelEfficiency> efficiencyList;
+        std::vector<PixelEfficiency> pixelList;
         {
             // set maximum spp with arbitrary larget number
             auto basicSampler =
-                std::unique_ptr<Sampler>(new RandomSampler(1000000));
+                std::unique_ptr<Sampler>(new RandomSampler(100000000));
             for (int y = 0; y < imageY; ++y) {
                 for (int x = 0; x < imageX; ++x) {
                     std::shared_ptr<Sampler> s =
                         basicSampler->Clone(y * imageX + x);
                     s->StartPixel(Point2i(x, y));
                     PixelEfficiency pEff(Point2i(x, y), s);
-                    efficiencyList.push_back(pEff);
+                    pixelList.push_back(pEff);
                 }
             }
         }
@@ -395,8 +402,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
         std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
         std::vector<Float> globalVariance(imageX * imageY, 0);
+        std::vector<Float> globalTime(imageX * imageY, 0);
 
-        clock_t globalTime = 0, globalStart = clock(), overheadTime = 0,
+        clock_t globalTimeCounter = 0, globalStart = clock(), overheadTime = 0,
                 overheadStart;
         std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
         {
@@ -404,7 +412,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
             for (int batch = 1; batch <= BATCH_NUM; ++batch) {
                 ParallelFor(
                     [&](int64_t iter) {
-                        auto &pEff = efficiencyList[iter];
+                        auto &pEff = pixelList[iter];
                         uint32_t pixelIndex =
                             pEff.pixel.y * imageX + pEff.pixel.x;
                         Point2i pixel = pEff.pixel;
@@ -435,11 +443,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
                             return;
                         }
 
-                        clock_t localTime, localStart = clock();
+                        // clock_t localTime, localStart = clock();
+                        Float localTime;
+                        auto localStart = hclock::now();
                         auto radianceValues = processPixel(
                             pixel, remainingSamples[pixelIndex], scene,
                             tileSampler, arena, filmTileArray[pixelIndex]);
-                        localTime = std::clock() - localStart;
+                        localTime = Float((hclock::now() - localStart).count());
 
                         // mean and variance of this batch
                         Spectrum sMean = std::accumulate(radianceValues.begin(),
@@ -452,14 +462,15 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         Float fVariance =
                             (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
                         globalVariance[pixelIndex] = fVariance;
+                        globalTime[pixelIndex] = localTime;
 
                         if (batch != BATCH_NUM) {
                             pEff.updateStats(radianceValues.size(), fMean,
                                              fVariance, localTime);
                         }
-                        // counter[pixelIndex] = std::clock() - start;
+                        // counter[pielIndex] = std::clock() - start;
                     },
-                    efficiencyList.size());
+                    pixelList.size());
 
                 overheadStart = clock();
 
@@ -471,44 +482,49 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 printf("[Batch%d]\n", batch);
 
                 // sort variance
-                auto indice = orderedIndice(globalVariance);
+                auto varIndice = orderedIndice(globalVariance);
+                auto timeIndice = orderedIndice(globalTime);
 
                 // clamp variance
-                int clampingNum = std::floor(efficiencyList.size() *
-                                             (1 - params.clampThreshold));
-                Float threshold = globalVariance[indice[clampingNum]];
+                int clampingNum =
+                    std::floor(pixelList.size() * (1 - params.clampThreshold));
+                Float varThreshold = globalVariance[varIndice[clampingNum]];
+                Float timeThreshold = globalTime[timeIndice[clampingNum]];
 
                 // Update efficiency
-                std::for_each(efficiencyList.begin(), efficiencyList.end(),
-                              [&threshold, &params](PixelEfficiency &pEff) {
-                                  if (pEff.variance > threshold)
-                                      pEff.variance = threshold;
+                std::for_each(pixelList.begin(), pixelList.end(),
+                              [&varThreshold, &timeThreshold,
+                               &params](PixelEfficiency &pEff) {
+                                  if (pEff.variance > varThreshold)
+                                      pEff.variance = varThreshold;
+                                  if (pEff.time > timeThreshold)
+                                      pEff.time = timeThreshold;
                                   pEff.updateEfficiency(params.method);
                               });
 
                 // sort by efficiency
                 std::sort(
-                    efficiencyList.begin(), efficiencyList.end(),
+                    pixelList.begin(), pixelList.end(),
                     [](const PixelEfficiency &lhs, const PixelEfficiency &rhs) {
                         return lhs.efficiency > rhs.efficiency;
                     });
 
                 Float effSum = std::accumulate(
-                    efficiencyList.begin(), efficiencyList.end(), 0.0,
+                    pixelList.begin(), pixelList.end(), 0.0,
                     [](const Float &a, const PixelEfficiency &b) {
                         return a + b.efficiency;
                     });
 
-                std::cout << "most efficient pixel: " << efficiencyList[0].pixel
+                std::cout << "most efficient pixel: " << pixelList[0].pixel
                           << std::endl;
-                printf("efficiency max(%f), sum(%f)\n",
-                       efficiencyList[0].efficiency, effSum);
-                printf("mean[%f], variance[%f]\n", efficiencyList[0].mean,
-                       efficiencyList[0].variance);
+                printf("efficiency max(%f), sum(%f)\n", pixelList[0].efficiency,
+                       effSum);
+                printf("mean[%f], variance[%f]\n", pixelList[0].mean,
+                       pixelList[0].variance);
 
                 uint32_t sampleCounter = 0;
-                for (size_t i = 0; i < efficiencyList.size(); ++i) {
-                    auto &pEff = efficiencyList[i];
+                for (size_t i = 0; i < pixelList.size(); ++i) {
+                    auto &pEff = pixelList[i];
                     int ind = pEff.pixel.y * imageX + pEff.pixel.x;
                     Float ratio = pEff.efficiency / effSum;
                     pEff.sampler->SetSampleNumber(0);
@@ -528,15 +544,15 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
                 uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
                 printf(
-                    "samples_per_batch(%d), sampleCounter(%ld), "
+                    "samples_per_batch(%d), sampleCounter(%d), "
                     "leftovers(%d)\n",
                     SAMPLES_PER_BATCH, sampleCounter, leftovers);
 
                 int ind = 0;
                 for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
-                    if (ind >= efficiencyList.size()) ind = 0;
-                    remainingSamples[efficiencyList[ind].pixel.y * imageX +
-                                     efficiencyList[ind].pixel.x]++;
+                    if (ind >= pixelList.size()) ind = 0;
+                    remainingSamples[pixelList[ind].pixel.y * imageX +
+                                     pixelList[ind].pixel.x]++;
                 }
 
                 overheadTime += clock() - overheadStart;
@@ -544,20 +560,20 @@ void SamplerIntegrator::Render(const Scene &scene) {
             // reporter.Done();
         }
 
-        globalTime = std::clock() - globalStart;
+        globalTimeCounter = std::clock() - globalStart;
 
         // [Stats] ==================================================
         printf("\n------------[Statistics]------------\n");
-        printf("Time: %fs\n", globalTime / Float(CLOCKS_PER_SEC));
+        printf("Time: %fs\n", globalTimeCounter / Float(CLOCKS_PER_SEC));
         printf("Time for overhead: %fs\n",
                overheadTime / Float(CLOCKS_PER_SEC));
         printf("Time without overhead: %fs\n",
-               (globalTime - overheadTime) / Float(CLOCKS_PER_SEC));
+               (globalTimeCounter - overheadTime) / Float(CLOCKS_PER_SEC));
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
         ExecutionResult result;
-        result.time = globalTime / Float(CLOCKS_PER_SEC);
+        result.time = globalTimeCounter / Float(CLOCKS_PER_SEC);
         exec.addResult(result);
 
         // [PRINT] ==================================================
@@ -566,7 +582,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<Float> efficiencyMap(imageX * imageY);
         std::vector<Float> timeMap(imageX * imageY);
 
-        for (auto pEff : efficiencyList) {
+        for (auto pEff : pixelList) {
             varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance;
             relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
                 pEff.variance / pow(pEff.mean + 0.0001, 2.0);
@@ -575,7 +591,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
             timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
         }
 
-        auto timeIndicator = std::to_string(globalTime / Float(CLOCKS_PER_SEC));
+        auto timeIndicator =
+            std::to_string(globalTimeCounter / Float(CLOCKS_PER_SEC));
         auto tmpVec = std::vector<int>();
         writeText(path, timeIndicator.c_str(), tmpVec, Point2i(), 0);
 
@@ -586,14 +603,16 @@ void SamplerIntegrator::Render(const Scene &scene) {
         //          0);
         // writeText(path, "efficiency", efficiencyMap, Point2i(256, 256),
         // 0);
-        writeText(path, "time", timeMap, Point2i(256, 256), 0);
+        writeText(path, "time", timeMap, Point2i(imageX, imageY), 0);
 
         // [Create Image] =====================================
-        writeImage(path, "raynum", totalSampleNum, Point2i(256, 256), 0);
-        writeImage(path, "variance", varianceMap, Point2i(256, 256), 0);
-        writeImage(path, "relVariance", relVarianceMap, Point2i(256, 256), 0);
-        writeImage(path, "efficiency", efficiencyMap, Point2i(256, 256), 0);
-        writeImage(path, "time", timeMap, Point2i(256, 256), 0);
+        writeImage(path, "raynum", totalSampleNum, Point2i(imageX, imageY), 0);
+        writeImage(path, "variance", varianceMap, Point2i(imageX, imageY), 0);
+        writeImage(path, "relVariance", relVarianceMap, Point2i(imageX, imageY),
+                   0);
+        writeImage(path, "efficiency", efficiencyMap, Point2i(imageX, imageY),
+                   0);
+        writeImage(path, "time", timeMap, Point2i(imageX, imageY), 0);
 
         // Merge image tile into _Film_
         for (auto &filmTile : filmTileArray) {
