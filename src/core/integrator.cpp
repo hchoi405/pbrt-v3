@@ -458,9 +458,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                          radianceValues.size();
                         Spectrum sVariance = getVariance(radianceValues, sMean);
 
-                        Float fMean = (sMean[0] + sMean[1] + sMean[2]) / 3;
-                        Float fVariance =
-                            (sVariance[0] + sVariance[1] + sVariance[2]) / 3;
+                        Float fMean = sMean.y();
+                        Float fVariance = sVariance.y();
                         globalVariance[pixelIndex] = fVariance;
                         globalTime[pixelIndex] = localTime;
 
