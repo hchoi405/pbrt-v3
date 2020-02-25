@@ -54,7 +54,7 @@
 
 namespace pbrt {
 using hclock = std::chrono::high_resolution_clock;
-using duration = std::chrono::duration<double>;
+using duration = std::chrono::duration<float>;
 STAT_COUNTER("Integrator/Camera rays traced", nCameraRays);
 
 // Integrator Method Definitions
@@ -404,8 +404,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<Float> globalVariance(imageX * imageY, 0);
         std::vector<Float> globalTime(imageX * imageY, 0);
 
-        clock_t globalTimeCounter = 0, globalStart = clock(), overheadTime = 0,
-                overheadStart;
+        auto overheadStart = hclock::now();
+        duration overheadTime;
+        auto globalStart = hclock::now();
         std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
         {
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
@@ -449,7 +450,9 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         auto radianceValues = processPixel(
                             pixel, remainingSamples[pixelIndex], scene,
                             tileSampler, arena, filmTileArray[pixelIndex]);
-                        localTime = Float((hclock::now() - localStart).count());
+                        localTime =
+                            Float((hclock::now() - localStart).count()) /
+                            1000;  // in micro seconds
 
                         // mean and variance of this batch
                         Spectrum sMean = std::accumulate(radianceValues.begin(),
@@ -471,7 +474,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     },
                     pixelList.size());
 
-                overheadStart = clock();
+                overheadStart = hclock::now();
 
                 // do not sort at last iteration
                 if (batch == BATCH_NUM) {
@@ -554,25 +557,24 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                      pixelList[ind].pixel.x]++;
                 }
 
-                overheadTime += clock() - overheadStart;
+                overheadTime += hclock::now() - overheadStart;
             }
             // reporter.Done();
         }
 
-        globalTimeCounter = std::clock() - globalStart;
+        duration globalTimeCounter = (hclock::now() - globalStart);
 
         // [Stats] ==================================================
         printf("\n------------[Statistics]------------\n");
-        printf("Time: %fs\n", globalTimeCounter / Float(CLOCKS_PER_SEC));
-        printf("Time for overhead: %fs\n",
-               overheadTime / Float(CLOCKS_PER_SEC));
+        printf("Time: %fs\n", globalTimeCounter.count());
+        printf("Time for overhead: %fs\n", overheadTime.count());
         printf("Time without overhead: %fs\n",
-               (globalTimeCounter - overheadTime) / Float(CLOCKS_PER_SEC));
+               (globalTimeCounter.count() - overheadTime.count()));
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
         ExecutionResult result;
-        result.time = globalTimeCounter / Float(CLOCKS_PER_SEC);
+        result.time = globalTimeCounter.count();
         exec.addResult(result);
 
         // [PRINT] ==================================================
@@ -584,14 +586,13 @@ void SamplerIntegrator::Render(const Scene &scene) {
         for (auto pEff : pixelList) {
             varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance;
             relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
-                pEff.variance / pow(pEff.mean + 0.0001, 2.0);
+                pEff.variance / (pow(pEff.mean, 2.0) + +0.01);
             efficiencyMap[pEff.pixel.y * imageX + pEff.pixel.x] =
                 pEff.efficiency;
             timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
         }
 
-        auto timeIndicator =
-            std::to_string(globalTimeCounter / Float(CLOCKS_PER_SEC));
+        auto timeIndicator = std::to_string(globalTimeCounter.count());
         auto tmpVec = std::vector<int>();
         writeText(path, timeIndicator.c_str(), tmpVec, Point2i(), 0);
 

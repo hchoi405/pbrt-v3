@@ -219,7 +219,7 @@ std::pair<Float, Float> diff2(std::string gtPath, std::string in) {
 
             float d = std::abs(c0 - c1) / c0;
             mse += (c0 - c1) * (c0 - c1);
-            rmse += (c0 - c1) * (c0 - c1) / pow(c0 + 0.0001, 2.0);
+            rmse += (c0 - c1) * (c0 - c1) / (pow(c0, 2.0) + 0.01);
             if (d > .005) ++smallDiff;
             if (d > .05) ++bigDiff;
         }
