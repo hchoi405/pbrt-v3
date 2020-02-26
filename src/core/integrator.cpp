@@ -467,13 +467,18 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                                          radianceValues.end(),
                                                          Spectrum(0.f)) /
                                          radianceValues.size();
-                        Spectrum sVariance = getVariance(radianceValues, sMean);
-
                         Float fMean = sMean.y();
-                        Float fVariance = sVariance.y();
+                        
+                        std::vector<Float> luminanceValues(radianceValues.size());
+                        for (int i=0; i<radianceValues.size(); ++i)
+                            luminanceValues[i] = radianceValues[i].y();
+                        // Spectrum sVariance = getVariance(radianceValues, sMean);
+                        Float fVariance = getVariance(luminanceValues, fMean);
+
                         globalVariance[pixelIndex] = fVariance;
                         globalTime[pixelIndex] = localTime;
 
+                        // Do not update at last iteration
                         if (batch != BATCH_NUM) {
                             if (radianceValues.size() <= 1) {
                                 std::cout << "Cannot estimate using less than "
@@ -604,12 +609,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<Float> timeMap(imageX * imageY);
 
         for (auto pEff : pixelList) {
-            varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance;
+            varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance / pEff.n;
             relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
-                pEff.variance / (pow(pEff.mean, 2.0) + +0.01);
+                pEff.variance / pEff.n / (pow(pEff.mean, 2.0) + +0.01);
             efficiencyMap[pEff.pixel.y * imageX + pEff.pixel.x] =
                 pEff.efficiency;
-            timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time;
+            timeMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.time / pEff.n;
         }
 
         auto timeIndicator = std::to_string(globalTimeCounter.count());

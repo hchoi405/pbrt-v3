@@ -144,9 +144,9 @@ void writeImage(std::string path, std::string filename, std::vector<T> &values,
     for (int i = 0; i < res.y; ++i) {
         for (int j = 0; j < res.x; ++j) {
             int ind = i * res.x + j;
-            rgb[3 * ind + 0] = Float(values[OFFSET + ind]) / maxValue;
-            rgb[3 * ind + 1] = Float(values[OFFSET + ind]) / maxValue;
-            rgb[3 * ind + 2] = Float(values[OFFSET + ind]) / maxValue;
+            rgb[3 * ind + 0] = Float(values[OFFSET + ind]);
+            rgb[3 * ind + 1] = Float(values[OFFSET + ind]);
+            rgb[3 * ind + 2] = Float(values[OFFSET + ind]);
         }
     }
 
@@ -245,6 +245,7 @@ std::vector<size_t> orderedIndice(std::vector<T> const &values) {
     std::vector<size_t> indices(values.size());
     std::iota(begin(indices), end(indices), static_cast<size_t>(0));
 
+    // greater
     std::sort(begin(indices), end(indices),
               [&](size_t a, size_t b) { return values[a] > values[b]; });
     return indices;
