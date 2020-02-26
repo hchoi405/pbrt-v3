@@ -48,7 +48,8 @@ struct PixelEfficiency {
     }
 
     void updateEfficiency(ASMethod method) {
-        Float relativeVariance = variance / pow(mean + Float(0.0001), Float(2.0));
+        Float relativeVariance =
+            variance / (pow(mean, Float(2.0)) + Float(0.01));
 
         // different metrics
         switch (method) {
@@ -59,7 +60,7 @@ struct PixelEfficiency {
             efficiency = relativeVariance / std::max(time, Float(1.0));
             break;
         }
-	}
+    }
 };
 
 struct ExecutionResult {
@@ -67,11 +68,12 @@ struct ExecutionResult {
 };
 
 struct ExecutionParams {
+    int initialSpp;
     int spp;
     ASMethod method;
     Float clampThreshold;
     int maxSppRatio;
-    int batch;
+    int batchNum;
     ExecutionResult result;
 
     std::string getDirectoryName() const {
@@ -85,8 +87,8 @@ struct ExecutionParams {
             methodName = std::string("eff");
             break;
         }
-        sprintf(tmp, "spp%d_%s_clamp%.4f_max%d", spp, methodName.c_str(),
-                clampThreshold, maxSppRatio);
+        sprintf(tmp, "init%d_spp%d_%s_clamp%.4f_max%d", initialSpp, spp,
+                methodName.c_str(), clampThreshold, maxSppRatio);
         return std::string(tmp);
     }
 };
@@ -149,8 +151,8 @@ void writeImage(std::string path, std::string filename, std::vector<T> &values,
     }
 
     char newfilename[255];
-    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path.c_str(), filename.c_str(), minValue,
-            maxValue);
+    sprintf(newfilename, "%sstat_%s_[%.4f,%.4f].exr", path.c_str(),
+            filename.c_str(), minValue, maxValue);
     pbrt::WriteImage(newfilename, &rgb[0],
                      Bounds2i(Point2i(0, 0), Point2i(res.x, res.y)),
                      Point2i(res.x, res.y));

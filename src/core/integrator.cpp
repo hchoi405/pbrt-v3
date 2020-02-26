@@ -239,7 +239,7 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 
 #ifdef ADAPTIVE_SAMPLING
 std::vector<Spectrum> SamplerIntegrator::processPixel(
-    Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
+    int batch, Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
     std::unique_ptr<FilmTile> &filmTile) {
     std::vector<Spectrum> radianceValues(remainingSampleNum);
@@ -291,6 +291,9 @@ std::vector<Spectrum> SamplerIntegrator::processPixel(
         radianceValues[sampleIndex - 1] = L;
 
         // Add camera ray's contribution to image
+        // Exclude the initial sampling becaust it is only used for stat
+        // estimation
+        if (batch > 1) 
         filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
 
         // Free _MemoryArena_ memory from computing image
@@ -353,21 +356,24 @@ void SamplerIntegrator::Render(const Scene &scene) {
         // Film should be clear before processing on new params
         camera->film->Clear();
 
-        const int BATCH_SIZE = SPP / params.batch;
+        // exclude initial sampling
+        bool initialSampling = SPP > params.initialSpp;
+        if (initialSampling) SPP -= params.initialSpp;
+
+        const int BATCH_SIZE = SPP / params.batchNum;
         if (SPP % BATCH_SIZE != 0) {
-            printf("SPP(%ld) is not dividible by BATCH_SIZE(%d)",
-                   sampler->samplesPerPixel, BATCH_SIZE);
-            std::cout << std::endl;
-            exit(-1);
-        } else if (BATCH_SIZE == 1) {
-            printf("BATCH_SIZE (SPP / params.betch) should larger than 1");
+            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)", SPP,
+                   BATCH_SIZE);
             std::cout << std::endl;
             exit(-1);
         }
-        const int BATCH_NUM = std::div(SPP, BATCH_SIZE).quot;
 
-        // to exclude cold cache latency, remove some rows
-        const int SAMPLES_PER_BATCH = BATCH_SIZE * imageX * imageY;
+        // include initial sampling
+        const int BATCH_NUM =
+            std::div(SPP, BATCH_SIZE).quot + (initialSampling ? 1 : 0);
+
+        std::vector<int> batchSizes(BATCH_NUM, BATCH_SIZE);
+        if (initialSampling) batchSizes[0] = params.initialSpp;
 
         std::vector<std::unique_ptr<FilmTile>> filmTileArray;
         for (int y = 0; y < imageY; ++y) {
@@ -399,7 +405,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
             }
         }
 
-        std::vector<uint32_t> remainingSamples(imageX * imageY, BATCH_SIZE);
+        std::vector<uint32_t> remainingSamples(imageX * imageY, batchSizes[0]);
         std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
         std::vector<Float> globalVariance(imageX * imageY, 0);
         std::vector<Float> globalTime(imageX * imageY, 0);
@@ -411,6 +417,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
         {
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
             for (int batch = 1; batch <= BATCH_NUM; ++batch) {
+                const int SAMPLES_PER_BATCH =
+                    batchSizes[batch - 1] * imageX * imageY;
                 ParallelFor(
                     [&](int64_t iter) {
                         auto &pEff = pixelList[iter];
@@ -448,7 +456,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         Float localTime;
                         auto localStart = hclock::now();
                         auto radianceValues = processPixel(
-                            pixel, remainingSamples[pixelIndex], scene,
+                            batch, pixel, remainingSamples[pixelIndex], scene,
                             tileSampler, arena, filmTileArray[pixelIndex]);
                         localTime =
                             Float((hclock::now() - localStart).count()) /
@@ -467,6 +475,11 @@ void SamplerIntegrator::Render(const Scene &scene) {
                         globalTime[pixelIndex] = localTime;
 
                         if (batch != BATCH_NUM) {
+                            if (radianceValues.size() <= 1) {
+                                std::cout << "Cannot estimate using less than "
+                                             "1 sample"
+                                          << std::endl;
+                            }
                             pEff.updateStats(radianceValues.size(), fMean,
                                              fVariance, localTime);
                         }
@@ -481,7 +494,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     break;
                 }
 
-                printf("[Batch%d]\n", batch);
+                printf("[Batch %d with %d samples]\n", batch,
+                       batchSizes[batch - 1]);
 
                 // sort variance
                 auto varIndice = orderedIndice(globalVariance);
@@ -516,6 +530,12 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     [](const Float &a, const PixelEfficiency &b) {
                         return a + b.efficiency;
                     });
+
+                if (effSum == Float(0.0)) {
+                    std::cout << "Error, sum of efficiency is zero"
+                              << std::endl;
+                    exit(-1);
+                }
 
                 std::cout << "most efficient pixel: " << pixelList[0].pixel
                           << std::endl;
@@ -569,7 +589,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         printf("Time: %fs\n", globalTimeCounter.count());
         printf("Time for overhead: %fs\n", overheadTime.count());
         printf("Time without overhead: %fs\n",
-               (globalTimeCounter.count() - overheadTime.count()));
+               globalTimeCounter.count() - overheadTime.count());
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
