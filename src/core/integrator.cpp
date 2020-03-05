@@ -239,12 +239,12 @@ std::unique_ptr<Distribution1D> ComputeLightPowerDistribution(
 
 #ifdef ADAPTIVE_SAMPLING
 std::vector<Spectrum> SamplerIntegrator::processPixel(
-    int batch, Point2i pixel, uint32_t &remainingSampleNum, const Scene &scene,
+    int batch, Point2i pixel, uint64_t &remainingSampleNum, const Scene &scene,
     std::shared_ptr<Sampler> &tileSampler, MemoryArena &arena,
     std::unique_ptr<FilmTile> &filmTile) {
     std::vector<Spectrum> radianceValues(remainingSampleNum);
 
-    for (uint32_t &sampleIndex = remainingSampleNum; sampleIndex > 0;
+    for (uint64_t &sampleIndex = remainingSampleNum; sampleIndex > 0;
          --sampleIndex) {
         // Initialize _CameraSample_ for current sample
         CameraSample cameraSample = tileSampler->GetCameraSample(pixel);
@@ -293,8 +293,7 @@ std::vector<Spectrum> SamplerIntegrator::processPixel(
         // Add camera ray's contribution to image
         // Exclude the initial sampling becaust it is only used for stat
         // estimation
-        if (batch > 1) 
-        filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
+        if (batch > 1) filmTile->AddSample(cameraSample.pFilm, L, rayWeight);
 
         // Free _MemoryArena_ memory from computing image
         arena.Reset();
@@ -326,31 +325,31 @@ void SamplerIntegrator::Render(const Scene &scene) {
                    (sampleExtent.y + tileSize - 1) / tileSize);
 
     std::string filename = camera->film->filename;
-    const std::string PATH_GT = "cornell_depth1_ss_gt.exr";
+    const std::string PATH_GT = "gt_ceramic_rgb.exr";
 
     Executor exec;
 
     // dummy params to remove cold cache
-    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
+    exec.addParams({2, 3, ASMethod::Efficiency, 0.999, 0, 1});
 
-    exec.addParams({154, ASMethod::Efficiency, 1.0, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 1.0, 0, 2});
+    exec.addParams({16, 16 + 16, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({16, 16 + 32768, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({32768, 32768 + 16, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({32768, 32768 + 32768, ASMethod::Rvariance, 0.99, 0, 1});
 
-	exec.addParams({154, ASMethod::Efficiency, 0.9999, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.9999, 0, 2});
-
-	exec.addParams({154, ASMethod::Efficiency, 0.999, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.999, 0, 2});
-
-    exec.addParams({154, ASMethod::Efficiency, 0.99, 0, 2});
-    exec.addParams({128, ASMethod::Rvariance, 0.99, 0, 2});
+    exec.addParams({16, 16 + 16, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({16, 16 + 32768, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({32768, 32768 + 16, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({32768, 32768 + 32768, ASMethod::Efficiency, 0.99, 0, 1});
 
     for (int exe = 0; exe < exec.getNum(); ++exe) {
         const ExecutionParams params = exec.getParams(exe);
+        std::cout << "----------[ " << params.getDirectoryName()
+                  << " ] ----------" << std::endl;
         std::string path = "results/" + params.getDirectoryName() + "/";
         createDirectory(path);
 
-        int SPP = params.spp;
+        uint64_t SPP = params.spp;
         camera->film->filename = path + params.getDirectoryName() + ".exr";
 
         // Film should be clear before processing on new params
@@ -362,17 +361,17 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         const int BATCH_SIZE = SPP / params.batchNum;
         if (SPP % BATCH_SIZE != 0) {
-            printf("SPP(%d) is not dividible by BATCH_SIZE(%d)", SPP,
+            printf("SPP(%lu) is not dividible by BATCH_SIZE(%d)", SPP,
                    BATCH_SIZE);
             std::cout << std::endl;
-            exit(-1);
+            continue;
         }
 
         // include initial sampling
         const int BATCH_NUM =
             std::div(SPP, BATCH_SIZE).quot + (initialSampling ? 1 : 0);
 
-        std::vector<int> batchSizes(BATCH_NUM, BATCH_SIZE);
+        std::vector<uint64_t> batchSizes(BATCH_NUM, BATCH_SIZE);
         if (initialSampling) batchSizes[0] = params.initialSpp;
 
         std::vector<std::unique_ptr<FilmTile>> filmTileArray;
@@ -405,24 +404,29 @@ void SamplerIntegrator::Render(const Scene &scene) {
             }
         }
 
-        std::vector<uint32_t> remainingSamples(imageX * imageY, batchSizes[0]);
-        std::vector<uint32_t> totalSampleNum(imageX * imageY, 0);
+        std::vector<uint64_t> remainingSamples(imageX * imageY, batchSizes[0]);
+        std::vector<uint64_t> totalSampleNum(imageX * imageY, 0);
         std::vector<Float> globalVariance(imageX * imageY, 0);
         std::vector<Float> globalTime(imageX * imageY, 0);
 
         auto overheadStart = hclock::now();
         duration overheadTime;
+        auto renderingStart = hclock::now();
         auto globalStart = hclock::now();
-        std::vector<uint32_t> globalSampleCounter(MaxThreadIndex());
+        duration globalTimeCounter = (hclock::now() - globalStart);
+        std::vector<uint64_t> globalSampleCounter(MaxThreadIndex());
         {
             // ProgressReporter reporter(imageX * imageY * SPP, "Rendering");
             for (int batch = 1; batch <= BATCH_NUM; ++batch) {
-                const int SAMPLES_PER_BATCH =
-                    batchSizes[batch - 1] * imageX * imageY;
+                printf("\t[Batch %d with %lu samples]\n", batch,
+                       batchSizes[batch - 1]);
+                // batch=1 : initial sampling
+                // batch>1 : rendering
+                renderingStart = hclock::now();
                 ParallelFor(
                     [&](int64_t iter) {
                         auto &pEff = pixelList[iter];
-                        uint32_t pixelIndex =
+                        uint64_t pixelIndex =
                             pEff.pixel.y * imageX + pEff.pixel.x;
                         Point2i pixel = pEff.pixel;
 
@@ -468,11 +472,11 @@ void SamplerIntegrator::Render(const Scene &scene) {
                                                          Spectrum(0.f)) /
                                          radianceValues.size();
                         Float fMean = sMean.y();
-                        
-                        std::vector<Float> luminanceValues(radianceValues.size());
-                        for (int i=0; i<radianceValues.size(); ++i)
+
+                        std::vector<Float> luminanceValues(
+                            radianceValues.size());
+                        for (int i = 0; i < radianceValues.size(); ++i)
                             luminanceValues[i] = radianceValues[i].y();
-                        // Spectrum sVariance = getVariance(radianceValues, sMean);
                         Float fVariance = getVariance(luminanceValues, fMean);
 
                         globalVariance[pixelIndex] = fVariance;
@@ -492,15 +496,17 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     },
                     pixelList.size());
 
-                overheadStart = hclock::now();
+                duration batchRenderingTime = hclock::now() - renderingStart;
+                // Exclude the time of initial sampling (1st batch)
+                if (batch > 1)
+                    globalTimeCounter += batchRenderingTime;
 
                 // do not sort at last iteration
                 if (batch == BATCH_NUM) {
                     break;
                 }
 
-                printf("[Batch %d with %d samples]\n", batch,
-                       batchSizes[batch - 1]);
+                overheadStart = hclock::now();
 
                 // sort variance
                 auto varIndice = orderedIndice(globalVariance);
@@ -531,17 +537,21 @@ void SamplerIntegrator::Render(const Scene &scene) {
                     });
 
                 Float effSum = std::accumulate(
-                    pixelList.begin(), pixelList.end(), 0.0,
+                    pixelList.begin(), pixelList.end(), Float(0.0),
                     [](const Float &a, const PixelEfficiency &b) {
                         return a + b.efficiency;
                     });
-
                 if (effSum == Float(0.0)) {
                     std::cout << "Error, sum of efficiency is zero"
                               << std::endl;
-                    exit(-1);
+                    break;
                 }
 
+                // Normalize the efficiency
+                for (auto &pixel : pixelList) {
+                    pixel.efficiency /= effSum;
+                }
+      
                 std::cout << "most efficient pixel: " << pixelList[0].pixel
                           << std::endl;
                 printf("efficiency max(%f), sum(%f)\n", pixelList[0].efficiency,
@@ -549,37 +559,49 @@ void SamplerIntegrator::Render(const Scene &scene) {
                 printf("mean[%f], variance[%f]\n", pixelList[0].mean,
                        pixelList[0].variance);
 
-                uint32_t sampleCounter = 0;
+                const uint64_t SAMPLES_PER_BATCH =
+                    batchSizes[batch] * imageX * imageY;
+                // Remaining samples after assigning 1 SPP for all pixels
+                auto samplerPerBatchRemain =
+                    SAMPLES_PER_BATCH - pixelList.size();
+
+                // Calculate the SPP for next iteration
+                uint64_t sampleCounter = 0;
                 for (size_t i = 0; i < pixelList.size(); ++i) {
                     auto &pEff = pixelList[i];
                     int ind = pEff.pixel.y * imageX + pEff.pixel.x;
-                    Float ratio = pEff.efficiency / effSum;
+                    Float ratio = pEff.efficiency;
                     pEff.sampler->SetSampleNumber(0);
-                    int candidate = std::floor(SAMPLES_PER_BATCH * ratio);
+                    uint64_t candidate = std::max(
+                        (uint64_t)std::floor(samplerPerBatchRemain * ratio),
+                        uint64_t(1));
 
-                    // spp clamping
-                    if (params.maxSppRatio > 0 &&
-                        candidate > params.spp * params.maxSppRatio) {
-                        candidate = params.spp * params.maxSppRatio;
-                    }
+                    // spp clamping (not used)
+                    // if (params.maxSppRatio > 0 &&
+                    //     candidate > params.spp * params.maxSppRatio) {
+                    //     candidate = params.spp * params.maxSppRatio;
+                    // }
 
                     remainingSamples[ind] = candidate;
                     sampleCounter += candidate;
-
                     totalSampleNum[ind] += candidate;
                 }
 
-                uint32_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
+                int64_t leftovers = SAMPLES_PER_BATCH - sampleCounter;
                 printf(
-                    "samples_per_batch(%d), sampleCounter(%d), "
-                    "leftovers(%d)\n",
+                    "samples_per_batch(%lu), sampleCounter(%lu), "
+                    "leftovers(%ld)\n",
                     SAMPLES_PER_BATCH, sampleCounter, leftovers);
-
-                int ind = 0;
-                for (uint32_t &i = leftovers; i > 0; --i, ++ind) {
-                    if (ind >= pixelList.size()) ind = 0;
-                    remainingSamples[pixelList[ind].pixel.y * imageX +
-                                     pixelList[ind].pixel.x]++;
+                if (leftovers < 0) {
+                    std::cout << "Error, leftovers is negative: " << leftovers
+                              << std::endl;
+                    break;
+                }
+                // Distribute leftovers to pixels randomly
+                for (int64_t &i = leftovers; i > 0; --i) {
+                    int ind =
+                        int((rand() / Float(RAND_MAX)) * pixelList.size());
+                    remainingSamples[ind]++;
                 }
 
                 overheadTime += hclock::now() - overheadStart;
@@ -587,17 +609,18 @@ void SamplerIntegrator::Render(const Scene &scene) {
             // reporter.Done();
         }
 
-        duration globalTimeCounter = (hclock::now() - globalStart);
 
         // [Stats] ==================================================
-        printf("\n------------[Statistics]------------\n");
-        printf("Time: %fs\n", globalTimeCounter.count());
+        printf("\t[Statistics]\n");
+        printf("Time without overhead %fs\n", globalTimeCounter.count());
         printf("Time for overhead: %fs\n", overheadTime.count());
-        printf("Time without overhead: %fs\n",
-               globalTimeCounter.count() - overheadTime.count());
+        // printf("Time without overhead: %fs\n",
+        //        globalTimeCounter.count() - overheadTime.count());
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
+        std::cout << std::endl;
+
         ExecutionResult result;
         result.time = globalTimeCounter.count();
         exec.addResult(result);
@@ -609,7 +632,8 @@ void SamplerIntegrator::Render(const Scene &scene) {
         std::vector<Float> timeMap(imageX * imageY);
 
         for (auto pEff : pixelList) {
-            varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] = pEff.variance / pEff.n;
+            varianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
+                pEff.variance / pEff.n;
             relVarianceMap[pEff.pixel.y * imageX + pEff.pixel.x] =
                 pEff.variance / pEff.n / (pow(pEff.mean, 2.0) + +0.01);
             efficiencyMap[pEff.pixel.y * imageX + pEff.pixel.x] =
@@ -789,7 +813,7 @@ Spectrum SamplerIntegrator::SpecularReflect(
 
     // Return contribution of specular reflection
     const Normal3f &ns = isect.shading.n;
-    if (pdf > 0.f && !f.IsBlack() && AbsDot(wi, ns) != 0.f) {
+    if (pdf > Float(0.0) && !f.IsBlack() && AbsDot(wi, ns) != Float(0.0)) {
         // Compute ray differential _rd_ for specular reflection
         RayDifferential rd = isect.SpawnRay(wi);
         if (ray.hasDifferentials) {
@@ -827,7 +851,7 @@ Spectrum SamplerIntegrator::SpecularTransmit(
                                BxDFType(BSDF_TRANSMISSION | BSDF_SPECULAR));
     Spectrum L = Spectrum(0.f);
     Normal3f ns = isect.shading.n;
-    if (pdf > 0.f && !f.IsBlack() && AbsDot(wi, ns) != 0.f) {
+    if (pdf > Float(0.0) && !f.IsBlack() && AbsDot(wi, ns) != Float(0.0)) {
         // Compute ray differential _rd_ for specular transmission
         RayDifferential rd = isect.SpawnRay(wi);
         if (ray.hasDifferentials) {

@@ -87,7 +87,7 @@ struct ExecutionParams {
             methodName = std::string("eff");
             break;
         }
-        sprintf(tmp, "init%d_spp%d_%s_clamp%.4f_max%d", initialSpp, spp,
+        sprintf(tmp, "%s_init%d_spp%d_clamp%.4f_max%d", initialSpp, spp,
                 methodName.c_str(), clampThreshold, maxSppRatio);
         return std::string(tmp);
     }
