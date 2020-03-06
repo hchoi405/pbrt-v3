@@ -11,7 +11,7 @@
 
 using namespace pbrt;
 
-enum class ASMethod { Rvariance, Efficiency };
+enum class ASMethod { Rvariance, Efficiency, Time };
 
 struct PixelEfficiency {
     Point2i pixel;
@@ -59,6 +59,9 @@ struct PixelEfficiency {
         case ASMethod::Efficiency:
             efficiency = relativeVariance / std::max(time, Float(1.0));
             break;
+        case ASMethod::Time:
+            efficiency = Float(1.0) / time;
+            break;
         }
     }
 };
@@ -86,9 +89,12 @@ struct ExecutionParams {
         case ASMethod::Efficiency:
             methodName = std::string("eff");
             break;
+        case ASMethod::Time:
+            methodName = std::string("time");
+            break;
         }
-        sprintf(tmp, "%s_init%d_spp%d_clamp%.4f_max%d", initialSpp, spp,
-                methodName.c_str(), clampThreshold, maxSppRatio);
+        sprintf(tmp, "%s_init%d_spp%d_clamp%.4f_max%d", methodName.c_str(),
+                initialSpp, spp, clampThreshold, maxSppRatio);
         return std::string(tmp);
     }
 };

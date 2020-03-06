@@ -332,15 +332,21 @@ void SamplerIntegrator::Render(const Scene &scene) {
     // dummy params to remove cold cache
     exec.addParams({2, 3, ASMethod::Efficiency, 0.999, 0, 1});
 
-    exec.addParams({16, 16 + 16, ASMethod::Rvariance, 0.99, 0, 1});
-    exec.addParams({16, 16 + 32768, ASMethod::Rvariance, 0.99, 0, 1});
-    exec.addParams({32768, 32768 + 16, ASMethod::Rvariance, 0.99, 0, 1});
-    exec.addParams({32768, 32768 + 32768, ASMethod::Rvariance, 0.99, 0, 1});
+    // {initialSpp, SPP, Metric, clampThreshold, maxSppRatio, batchNum}
+    exec.addParams({16, 16, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({16, 8192, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({8192, 16, ASMethod::Rvariance, 0.99, 0, 1});
+    exec.addParams({8192, 8192, ASMethod::Rvariance, 0.99, 0, 1});
 
-    exec.addParams({16, 16 + 16, ASMethod::Efficiency, 0.99, 0, 1});
-    exec.addParams({16, 16 + 32768, ASMethod::Efficiency, 0.99, 0, 1});
-    exec.addParams({32768, 32768 + 16, ASMethod::Efficiency, 0.99, 0, 1});
-    exec.addParams({32768, 32768 + 32768, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({16, 16, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({16, 8192, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({8192, 16, ASMethod::Efficiency, 0.99, 0, 1});
+    exec.addParams({8192, 8192, ASMethod::Efficiency, 0.99, 0, 1});
+
+    exec.addParams({16, 16, ASMethod::Time, 0.99, 0, 1});
+    exec.addParams({16, 8192, ASMethod::Time, 0.99, 0, 1});
+    exec.addParams({8192, 16, ASMethod::Time, 0.99, 0, 1});
+    exec.addParams({8192, 8192, ASMethod::Time, 0.99, 0, 1});
 
     for (int exe = 0; exe < exec.getNum(); ++exe) {
         const ExecutionParams params = exec.getParams(exe);
@@ -356,8 +362,7 @@ void SamplerIntegrator::Render(const Scene &scene) {
         camera->film->Clear();
 
         // exclude initial sampling
-        bool initialSampling = SPP > params.initialSpp;
-        if (initialSampling) SPP -= params.initialSpp;
+        bool useInitialSampling = params.initialSpp > 0;
 
         const int BATCH_SIZE = SPP / params.batchNum;
         if (SPP % BATCH_SIZE != 0) {
@@ -369,10 +374,10 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
         // include initial sampling
         const int BATCH_NUM =
-            std::div(SPP, BATCH_SIZE).quot + (initialSampling ? 1 : 0);
+            std::div(SPP, BATCH_SIZE).quot + (useInitialSampling ? 1 : 0);
 
         std::vector<uint64_t> batchSizes(BATCH_NUM, BATCH_SIZE);
-        if (initialSampling) batchSizes[0] = params.initialSpp;
+        if (useInitialSampling) batchSizes[0] = params.initialSpp;
 
         std::vector<std::unique_ptr<FilmTile>> filmTileArray;
         for (int y = 0; y < imageY; ++y) {
@@ -614,8 +619,6 @@ void SamplerIntegrator::Render(const Scene &scene) {
         printf("\t[Statistics]\n");
         printf("Time without overhead %fs\n", globalTimeCounter.count());
         printf("Time for overhead: %fs\n", overheadTime.count());
-        // printf("Time without overhead: %fs\n",
-        //        globalTimeCounter.count() - overheadTime.count());
         printf("Counted samples: %u\n",
                std::accumulate(globalSampleCounter.begin(),
                                globalSampleCounter.end(), 0));
