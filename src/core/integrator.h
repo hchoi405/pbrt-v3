@@ -85,8 +85,11 @@ class SamplerIntegrator : public Integrator {
     void Render(const Scene &scene);
     std::vector<Spectrum> processPixel(int batch, Point2i pixel,
                                        uint64_t &remainingSampleNum,
-                      const Scene &scene, std::shared_ptr<Sampler> &tileSampler,
-                      MemoryArena &arena, std::unique_ptr<FilmTile> &filmTile); 
+                                       const Scene &scene,
+                                       std::shared_ptr<Sampler> &tileSampler,
+                                       MemoryArena &arena,
+                                       std::unique_ptr<FilmTile> &filmTile,
+                                       std::vector<Float> *timeValues);
     virtual Spectrum Li(const RayDifferential &ray, const Scene &scene,
                         Sampler &sampler, MemoryArena &arena,
                         int depth = 0) const = 0;

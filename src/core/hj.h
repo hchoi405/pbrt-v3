@@ -11,7 +11,7 @@
 
 using namespace pbrt;
 
-enum class ASMethod { Rvariance, Efficiency, Time };
+enum class ASMethod { Rvariance, Efficiency, Time, Uniform };
 
 struct PixelEfficiency {
     Point2i pixel;
@@ -62,6 +62,9 @@ struct PixelEfficiency {
         case ASMethod::Time:
             efficiency = Float(1.0) / time;
             break;
+        case ASMethod::Uniform:
+            efficiency = 1.f;
+            break;
         }
     }
 };
@@ -78,6 +81,7 @@ struct ExecutionParams {
     int maxSppRatio;
     int batchNum;
     ExecutionResult result;
+    bool collectStat;
 
     std::string getDirectoryName() const {
         char tmp[255];
@@ -91,6 +95,9 @@ struct ExecutionParams {
             break;
         case ASMethod::Time:
             methodName = std::string("time");
+            break;
+        case ASMethod::Uniform:
+            methodName = std::string("uni");
             break;
         }
         sprintf(tmp, "%s_init%d_spp%d_clamp%.4f_max%d", methodName.c_str(),
@@ -122,9 +129,12 @@ class Executor {
     Executor() { createDirectory("results\\"); }
     size_t getNum() const { return _params.size(); }
 
-    ExecutionParams getParams(int i) { return _params[i]; }
+    ExecutionParams &getParams(int i) { return _params[i]; }
 
-    void addParams(ExecutionParams params) { _params.push_back(params); }
+    void addParams(ExecutionParams params) {
+        _params.push_back(params);
+        params.collectStat = false;
+    }
 
     void addResult(ExecutionResult result) { _results.push_back(result); }
 };
@@ -166,7 +176,7 @@ void writeImage(std::string path, std::string filename, std::vector<T> &values,
 
 template <typename T>
 void writeText(std::string path, std::string filename, std::vector<T> &values,
-               Point2i res, const int OFFSET) {
+               const int OFFSET) {
     char newfilename[255];
 
     sprintf(newfilename, "%sstat_%s.txt", path.c_str(), filename.c_str());
